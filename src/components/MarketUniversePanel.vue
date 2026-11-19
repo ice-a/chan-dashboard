@@ -57,9 +57,9 @@ import { useCatalogOverview } from '../composables/useCatalogOverview';
 import { rankRawEntries } from '../domain/resonance';
 import AppIcon from './AppIcon.vue';
 
-type PagedSourceId = 'sse_main' | 'sse_star' | 'szse_stocks' | 'szse_etf' | 'nasdaq_stocks' | 'nasdaq_etf';
+type PagedSourceId = 'sse_main' | 'sse_star' | 'szse_stocks' | 'szse_etf';
 
-const PAGED_SOURCES: PagedSourceId[] = ['sse_main', 'sse_star', 'szse_stocks', 'szse_etf', 'nasdaq_stocks', 'nasdaq_etf'];
+const PAGED_SOURCES: PagedSourceId[] = ['sse_main', 'sse_star', 'szse_stocks', 'szse_etf'];
 
 const { overview, refresh } = useCatalogOverview();
 const busy = ref(false);
@@ -108,15 +108,59 @@ async function syncCatalog(): Promise<void> {
 }
 
 async function runPagedSync(): Promise<void> {
+  const failures: string[] = [];
   for (const source of PAGED_SOURCES) {
     let cursor: string | null = null;
-    do {
+    let retries = 0;
+    // One source failing (e.g. exchange WAF from this network) must not abort the others:
+    // retry with backoff, then record the failure and continue.
+    while (!stop) {
       const body: { source: PagedSourceId; cursor: string | null } = { source, cursor };
-      const response = await fetch('/api/catalog/sync/page', { method: 'POST', headers: { ...headers(), 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
-      if (!response.ok) throw new Error(response.error ?? `${source} 分页同步失败`);
-      cursor = response.nextCursor ?? null;
-      syncStates.value = mergeState(syncStates.value, response.state);
-    } while (cursor && !stop);
+      const response = await fetch('/api/catalog/sync/page', { method: 'POST', headers: { ...headers(), 'content-type': 'application/json' }, body: JSON.stringify(body) })
+        .then((r) => r.json())
+        .catch(() => ({ ok: false, error: '目录分页请求失败' }) as { ok: false; error: string });
+      if (response.ok) {
+        retries = 0;
+        syncStates.value = mergeState(syncStates.value, (response as { state?: SyncSourceState }).state);
+        cursor = (response as { nextCursor?: string | null }).nextCursor ?? null;
+        if (!cursor) break;
+        continue;
+      }
+      const failed = response as { error?: string; state?: SyncSourceState };
+      if (failed.state) syncStates.value = mergeState(syncStates.value, failed.state);
+      if (retries < 2) {
+        retries += 1;
+        await new Promise((resolve) => setTimeout(resolve, 700 * retries));
+        continue;
+      }
+      failures.push(`${sourceLabel(source)}：${failed.error ?? '分页同步失败'}`);
+      break;
+    }
+    if (stop) return;
+  }
+  // Nasdaq: single-shot download proxied unparsed and parsed in the browser —
+  // its paged endpoint orders rows non-deterministically, so offset windows
+  // both duplicate and miss symbols (Workers CPU budget rules out server parse).
+  for (const kind of ['stocks', 'etf'] as const) {
+    if (stop) return;
+    const source: 'nasdaq_stocks' | 'nasdaq_etf' = kind === 'stocks' ? 'nasdaq_stocks' : 'nasdaq_etf';
+    try {
+      const upstream = await fetch(`/api/catalog/nasdaq-screener?kind=${kind}`);
+      if (!upstream.ok) throw new Error((await upstream.json()).error ?? 'Nasdaq目录获取失败');
+      const root = await upstream.json();
+      const { parseNasdaqScreener } = await import('../../shared/nasdaqScreener');
+      const parsed = parseNasdaqScreener(kind, root);
+      for (let i = 0; i < parsed.instruments.length; i += 1000) {
+        const chunk = await fetch('/api/catalog/stage', { method: 'POST', headers: { ...headers(), 'content-type': 'application/json' }, body: JSON.stringify({ rows: parsed.instruments.slice(i, i + 1000), ...(i === 0 ? { declaredTotal: parsed.declaredTotal } : {}), done: i + 1000 >= parsed.instruments.length }) }).then((r) => r.json());
+        if (!chunk.ok) throw new Error(chunk.error ?? 'Nasdaq目录暂存失败');
+        syncStates.value = mergeState(syncStates.value, chunk.state);
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Nasdaq目录同步失败';
+      failures.push(`${sourceLabel(source)}：${message}`);
+      const reported = await fetch('/api/catalog/sync-fail', { method: 'POST', headers: { ...headers(), 'content-type': 'application/json' }, body: JSON.stringify({ source, error: message }) }).then((r) => r.json()).catch(() => null);
+      if (reported?.ok) syncStates.value = mergeState(syncStates.value, reported.state);
+    }
   }
   // HKEX workbook: heavy XLSX parse happens in the browser (Workers CPU budget).
   staging.value = true;
@@ -137,9 +181,16 @@ async function runPagedSync(): Promise<void> {
       if (!chunk.ok) throw new Error(chunk.error ?? '港交所目录暂存失败');
       syncStates.value = mergeState(syncStates.value, chunk.state);
     }
+  } catch (e) {
+    // Report the workbook failure so commit knows HKEX is missing, then still commit the rest.
+    const message = e instanceof Error ? e.message : '港交所目录同步失败';
+    failures.push(`港交所：${message}`);
+    const reported = await fetch('/api/catalog/sync-fail', { method: 'POST', headers: { ...headers(), 'content-type': 'application/json' }, body: JSON.stringify({ source: 'hkex', error: message }) }).then((r) => r.json()).catch(() => null);
+    if (reported?.ok) syncStates.value = mergeState(syncStates.value, reported.state);
   } finally { staging.value = false; }
   const commit = await fetch('/api/catalog/commit', { method: 'POST', headers: headers() }).then((r) => r.json());
   if (!commit.ok) throw new Error(commit.error ?? '目录提交失败');
+  if (failures.length) throw new Error(`部分来源未同步（目录未封口）：${failures.join('；')}`);
 }
 
 function mergeState(list: SyncSourceState[], state: SyncSourceState | undefined): SyncSourceState[] {

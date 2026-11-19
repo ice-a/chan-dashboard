@@ -56,8 +56,8 @@
 | --- | --- | ---: | --- |
 | A股 | 上交所 getStockListData2（主板 + 科创板） | 1,604 + 405 | 完整分页验证 |
 | A股 | 深交所 ShowReport（A股 + ETF） | 2,905 + 772（ETF 含 LOF 过滤） | 完整分页验证；当前网络偶发 fetch failed，失败轮会如实标注 |
-| 港股 | 港交所 ListOfSecurities.xlsx（主板普通股） | 本机仅取到 5 条（文件被截断） | 该网络下不可靠，需在实际部署环境重试 |
-| 美股 | Nasdaq screener stocks + etf | 7,291（纳入 5,807，排除权证/优先股等 1,484）+ 5,519 | 完整验证 |
+| 港股 | 港交所 ListOfSecurities.xlsx（主板普通股） | 完整工作簿应为数千行 | 本机与 Cloudflare 出口实测均只拿到 8 行**样本文件**（仅前 5 只，换浏览器 UA / 带 Cookie 结果字节完全相同），截断护栏如实判失败；需能从港交所取得完整文件的网络或客户端 |
+| 美股 | Nasdaq screener `download=true` 全量单次（浏览器解析） | 7,291（纳入约 5,805，排除权证/优先股等约 1,486）+ 5,519 | 完整验证；分页端点每次请求顺序非确定（offset 开窗会重复且遗漏），已弃用分页改为全量下载 |
 | 北交所 | bse.cn 有反爬拦截 | 未同步 | 明确列为缺口，不伪造数据 |
 
 目录同步要求逐页取完、数量与声明一致、跨来源无重复 ID；任何一页失败则该来源标记 failed，**未封口目录不会冒充全市场**。来源报告在页面"全市场目录与扫描"面板逐项展示。
@@ -66,7 +66,7 @@
 
 - **目录同步两种驱动**：
   - Node/Docker（`driver: server`）：`POST /api/catalog/sync` 一次完成四来源同步，每来源最多重试 2 次。
-  - Workers（`driver: client`）：逐页 `POST /api/catalog/sync/page`；港交所 XLSX 由**浏览器解析**（Workers CPU 10ms 预算）后 `POST /api/catalog/stage` 暂存，最后 `POST /api/catalog/commit` 提交。提交时任何来源未完成 → `complete:false`（未封口），不冒充全市场。
+  - Workers（`driver: client`）：逐页 `POST /api/catalog/sync/page`；港交所 XLSX 与 Nasdaq 全量 JSON 由**浏览器解析**（Workers CPU 10ms 预算，`/api/catalog/hkex-workbook`、`/api/catalog/nasdaq-screener` 仅透传字节）后 `POST /api/catalog/stage` 暂存，最后 `POST /api/catalog/commit` 提交。提交校验要求 7 个预期来源全部在场且完成，否则 `complete:false`（未封口），不冒充全市场。任一分页失败会**落账为 failed 并继续其余来源**（逐来源重试 2 次），不会一源失败中断全局。
 - **扫描两种驱动**：
   - Node：`POST /api/scans` 后服务端后台分片推进（每批 8 只），完成后自动评分并封口。
   - Workers：前端循环 `POST /api/scans/:id/step` 推进 → `GET /raws` 拉取评分输入 → **浏览器计算全局排名**（`rankRawEntries`，与服务端同一纯函数）→ `POST /scores` 分块回写 → `POST /finalize` 封口校验。进度持久化在 D1，刷新页面可断点续跑。
@@ -88,8 +88,8 @@ node server/node/index.ts --research-token <你的本地管理令牌>
 ### 已知缺口（如实标注，不伪造）
 
 - 港股 ETF 目录与北交所目录暂缺来源，页面会显示来源缺口而非假装完整。
-- 港交所工作簿有下载截断护栏（主板普通股 <1000 条即判失败）；本机网络实测常被截断到 5 条，需在可完整下载的网络重试。
-- 深交所/港交所依赖网络可达性，失败来源会标注 `failed` 并可重试；`complete:false` 目录即"未封口"，扫描可继续但来源缺口可见。
+- 港交所工作簿有下载截断护栏（主板普通股 <1000 条即判失败）；本机与 Cloudflare 出口实测拿到的都是仅含前 5 只的样本文件（非传输截断：有效 XLSX、字节完全一致），需换能取得完整文件的网络/客户端。
+- 深交所/港交所依赖网络可达性，失败来源会标注 `failed` 并可重试；Cloudflare 出口访问上交所会被 WAF 403 拦截（深交所、Nasdaq、港交所可达）。`complete:false` 目录即"未封口"，扫描可继续但来源缺口可见。
 - 扫描中的失败项可重试；封口校验在 `finalize` 与 `shared/integrity.ts`。
 
 ## 结构图谱、导出与本机历史
@@ -233,12 +233,13 @@ tests/              算法、校验、缓存与降级单元测试
 
 - Vitest：22 项单元测试通过（含结构映射、收藏、导出和信号历史）。
 - TypeScript、Vite 生产构建：通过。ECharts 独立打包，首屏会加载图表模块；XLSX（港交所解析）按需分包。
-- D1 数据库：8 张表已应用到远程 `chan-dashboard-db`；行情缓存从 KV 迁至 D1（响应 Cloudflare KV 日操作上限告警）。
-- 全市场目录实测：上交所 1,604+405、Nasdaq 股票 5,807 / ETF 5,519、港交所与深交所因本机网络失败被如实标注；同步 ~13s、失败来源自动重试 2 次。
-- 全量扫描实测封口：13,335 只 31 分钟跑完（约 7 只/秒，本机网络限速），终态 = 10,411 成功 + 2,924 失败（CN/HK 上游不可达），评分 10,411 全部落表，四象限 995 / 2,134 / 713 / 6,569，封口校验通过并发布快照；进度实时可查、刷新页面可断点续显。
-- 快照查询实测：`/api/snapshots/current/rankings` 分页返回真实排名与总数，`current` 别名解析为真实快照 ID（修复后）；40 只抽样扫描 5 秒封口，32 成功全部可查、8 失败进入诊断。
+- D1 数据库：8 张表已应用到远程 `chan-dashboard-db`；行情缓存从 KV 迁至 D1（响应 Cloudflare KV 日操作上限告警，KV 已不读写）。
+- Cloudflare 线上：已部署至 **https://pan.020417.xyz**（`pnpm exec wrangler deploy`），`RESEARCH_ADMIN_TOKEN` 以 Worker secret 配置，无令牌写操作返回 401；Nasdaq 全量透传解析、分页同步、失败落账均在线上实测通过。
+- 线上目录现状（未封口如实展示）：深交所 2,905 + ETF 772、Nasdaq 5,805 + ETF 5,519 完整；上交所被 Cloudflare 出口 403、港交所仅获样本文件，标 failed 待重试。
+- 配额约束：KV 日限额已耗尽（不再读写）；D1 行读写接近每日上限时，线上 nasdaq 目录补暂存（约 1.1 万行写入）与线上全量扫描推迟到限额重置（UTC 00:00）后执行。
+- 全市场目录实测：上交所 1,604+405、Nasdaq 股票 5,807 / ETF 5,519、港交所与深交所因本机网络失败被如实标注；同步约 13–60 秒（视网络）、失败来源自动重试 2 次。
+- 全量扫描实测封口：13,335 只 31 分钟跑完（约 7 只/秒，本机网络限速），两轮终态分别为 10,411 + 2,924 与 8,393 + 4,942 成功/失败（本机网络随时间劣化，失败项可重试），评分与四象限（首轮 995 / 2,134 / 713 / 6,569）全部落表，封口校验通过并发布快照；进度实时可查、刷新页面可断点续显。
+- 快照查询实测：`/api/snapshots/current/rankings` 分页返回真实排名与总数（`current` 别名解析为真实快照 ID）；40 只抽样扫描 5 秒封口，32 成功全部可查、8 失败进入诊断。排名并列按算法口径（共振分 → 动量分 → ID）对齐，# 列与显示顺序一致。
 - 主题：浅色 / 深色 / 暖砂三套，图表随主题重绘；首屏数字（Hero、刷新分母、市场规模）全部改为动态取值。
-- Cloudflare：Wrangler dry-run 配置及 Worker 打包通过，本地健康检查通过，未执行线上部署。
-- Vercel：官方构建器及动态 Function 编译通过，直接 `fetch` 真实美股请求成功；CLI 本地开发需要已有登录凭据，未执行线上部署。
-- Docker：当前机器无 Docker 可执行文件，已提供配置但未能实际构建容器。
+- Vercel：官方构建器及动态 Function 编译通过；Docker：当前机器无 Docker 可执行文件，未实际构建容器。
 - GitHub Actions：已按需求移除（仓库仅代码托管，手动 `pnpm cf:deploy`）。

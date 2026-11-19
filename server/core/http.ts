@@ -53,7 +53,7 @@ export function createResearchHandler(router: ProviderRouter, options: ResearchH
       const { szseCatalog } = await import('../catalog/szse.ts');
       const { nasdaqCatalog } = await import('../catalog/nasdaq.ts');
       const { hkexCatalog } = await import('../catalog/hkex.ts');
-      const snapshot = await syncCatalog([sseCatalog, szseCatalog, hkexCatalog, nasdaqCatalog], { fetch, timeoutMs: catalogTimeoutMs });
+      const snapshot = await syncCatalog([sseCatalog, szseCatalog, hkexCatalog, nasdaqCatalog], { fetch: (input, init) => globalThis.fetch(input, init), timeoutMs: catalogTimeoutMs });
       await store.publishCatalog(snapshot);
       return json({ ok: true, snapshot: { version: snapshot.version, complete: snapshot.complete, total: snapshot.instruments.length, sources: snapshot.sources } });
     }
@@ -63,12 +63,22 @@ export function createResearchHandler(router: ProviderRouter, options: ResearchH
       const cursor = body?.cursor == null ? null : String(body.cursor);
       if (!isPagedSource(source)) return json({ error: '不支持的分页目录来源' }, 400);
       try {
-        const result = await fetchCatalogPage(source as PagedSource, cursor, { fetch: globalThis.fetch, timeoutMs: Math.min(catalogTimeoutMs, 20_000), signal: request.signal });
+        const result = await fetchCatalogPage(source as PagedSource, cursor, { fetch: (input, init) => globalThis.fetch(input, init), timeoutMs: Math.min(catalogTimeoutMs, 20_000), signal: request.signal });
         const state = await store.stageCatalogPage(result);
         return json({ ok: true, state, nextCursor: result.nextCursor });
       } catch (error) {
-        return json({ ok: false, error: error instanceof Error ? error.message : '目录分页获取失败' }, 502);
+        const message = error instanceof Error ? error.message : '目录分页获取失败';
+        // Persist the failure so the source reports honestly and commit stays incomplete.
+        const state = await store.failCatalogSource(source, message);
+        return json({ ok: false, error: message, state }, 502);
       }
+    }
+    if (path === '/api/catalog/sync-fail' && request.method === 'POST') {
+      if (!checkAdmin(request, adminToken)) return json({ error: '需要管理员令牌' }, 401);
+      const source = String(body?.source ?? '');
+      if (!source || source.length > 40) return json({ error: '来源无效' }, 400);
+      const state = await store.failCatalogSource(source, String(body?.error ?? '目录同步失败'));
+      return json({ ok: true, state });
     }
     if (path === '/api/catalog/hkex-workbook') {
       try {
@@ -77,6 +87,22 @@ export function createResearchHandler(router: ProviderRouter, options: ResearchH
         return new Response(upstream.body, { headers: { 'content-type': 'application/octet-stream', 'cache-control': 'no-store' } });
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : '港交所目录获取失败' }, 502);
+      }
+    }
+    if (path === '/api/catalog/nasdaq-screener') {
+      // The paged screener order is non-deterministic, so catalog sync uses the
+      // single-shot download=true payload, proxied unparsed (browser parses it —
+      // Workers CPU budget). Fixed host and path: not an open proxy.
+      const kind = url.searchParams.get('kind') === 'etf' ? 'etf' : 'stocks';
+      try {
+        const upstream = await fetch(`https://api.nasdaq.com/api/screener/${kind}?tableonly=true&limit=25&offset=0&download=true`, {
+          headers: { accept: 'application/json', 'user-agent': 'ChanDashboard/1.0' },
+          signal: AbortSignal.timeout(catalogTimeoutMs),
+        });
+        if (!upstream.ok || !upstream.body) return json({ error: `Nasdaq目录HTTP ${upstream.status}` }, 502);
+        return new Response(upstream.body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : 'Nasdaq目录获取失败' }, 502);
       }
     }
     if (path === '/api/catalog/stage' && request.method === 'POST') {

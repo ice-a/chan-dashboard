@@ -75,6 +75,7 @@ export interface ResearchStore {
   // Catalog: staged sync (paged) — required for driver='client'
   stageCatalogPage(result: PagedResult): Promise<SyncSourceState>;
   stageCatalogRows(source: string | 'hkex', rows: CatalogInstrument[], options?: { declaredTotal?: number; pageCount?: number; done?: boolean; sourceDate?: string | null }): Promise<SyncSourceState>;
+  failCatalogSource(source: string, error: string): Promise<SyncSourceState>;
   syncState(): Promise<SyncSourceState[]>;
   resetSync(): Promise<void>;
   commitCatalog(): Promise<{ version: string; complete: boolean; total: number; sources: CatalogSourceReport[] }>;
@@ -172,6 +173,13 @@ export class MemoryResearchStore implements ResearchStore {
     state.declaredTotal = options?.declaredTotal ?? state.declaredTotal;
     state.status = options?.done ? 'complete' : 'running';
     state.updatedAt = new Date().toISOString();
+    this.sync.set(source, state);
+    return state;
+  }
+
+  async failCatalogSource(source: string, error: string): Promise<SyncSourceState> {
+    const previous = this.sync.get(source);
+    const state: SyncSourceState = { source, status: 'failed', declaredTotal: previous?.declaredTotal ?? null, pageCount: previous?.pageCount ?? null, pagesDone: previous?.pagesDone ?? 0, stagedCount: previous?.stagedCount ?? 0, error: error.slice(0, 300), updatedAt: new Date().toISOString() };
     this.sync.set(source, state);
     return state;
   }

@@ -29,7 +29,8 @@ function ensure(env: Env): void {
   const router = createDefaultRouter(cache, env as Record<string, string | undefined>);
   marketHandler = createMarketHandler(router);
   // Workers cannot keep long background jobs alive after a response; the dashboard drives scan/sync steps.
-  researchHandler = createResearchHandler(router, { store, backgroundScan: !env.DB });
+  const adminToken = typeof env.RESEARCH_ADMIN_TOKEN === 'string' && env.RESEARCH_ADMIN_TOKEN ? env.RESEARCH_ADMIN_TOKEN : undefined;
+  researchHandler = createResearchHandler(router, { store, backgroundScan: !env.DB, adminToken });
 }
 
 export default {

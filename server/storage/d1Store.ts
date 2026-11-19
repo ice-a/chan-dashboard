@@ -145,6 +145,19 @@ export class D1ResearchStore {
     return state;
   }
 
+  /** Mark a catalog source as failed (page fetch or workbook error) so commit stays "未封口". */
+  async failCatalogSource(source: string, error: string): Promise<SyncSourceState> {
+    const previous = (await this.syncState(source))[0];
+    const state: SyncSourceState = {
+      source, status: 'failed',
+      declaredTotal: previous?.declaredTotal ?? null, pageCount: previous?.pageCount ?? null,
+      pagesDone: previous?.pagesDone ?? 0, stagedCount: previous?.stagedCount ?? 0,
+      error: error.slice(0, 300), updatedAt: new Date().toISOString(),
+    };
+    await this.upsertSync(state);
+    return state;
+  }
+
   async stageCatalogRows(source: string | 'hkex', rows: CatalogInstrument[], options?: { declaredTotal?: number; pageCount?: number; done?: boolean; sourceDate?: string | null }): Promise<SyncSourceState> {
     if (rows.length) {
       const statements = [];
@@ -195,7 +208,11 @@ export class D1ResearchStore {
     const total = countRow?.n ?? 0;
     if (!total) throw new Error('暂存目录为空，无法提交');
     // Partial catalogs are allowed but labelled incomplete — they must never masquerade as full-market.
-    const complete = states.every((state) => state.status === 'complete');
+    // All seven expected sources (6 paged + HKEX workbook) must be present and complete, or the
+    // snapshot stays "未封口" even when every staged source finished.
+    const expected = ['sse_main', 'sse_star', 'szse_stocks', 'szse_etf', 'nasdaq_stocks', 'nasdaq_etf', 'hkex'];
+    const bySource = new Map(states.map((state) => [state.source, state]));
+    const complete = expected.every((source) => bySource.get(source)?.status === 'complete');
     const dup = await this.db.prepare('SELECT id, COUNT(DISTINCT source) AS n FROM stage_row GROUP BY id HAVING n > 1 LIMIT 1').first<{ id: string }>();
     if (dup) throw new Error(`跨来源标的ID重复：${dup.id}`);
     const version = crypto.randomUUID();

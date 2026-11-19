@@ -1,7 +1,7 @@
 import type { CatalogInstrument } from '../../shared/catalog.ts';
 import { cleanText, fetchCatalogJson, record } from './types.ts';
 
-export type PagedSource = 'sse_main' | 'sse_star' | 'szse_stocks' | 'szse_etf' | 'nasdaq_stocks' | 'nasdaq_etf';
+export type PagedSource = 'sse_main' | 'sse_star' | 'szse_stocks' | 'szse_etf';
 
 export interface PagedResult {
   source: PagedSource;
@@ -28,7 +28,9 @@ export async function fetchCatalogPage(source: PagedSource, cursor: string | nul
   if (!Number.isInteger(page) || page < 0) throw new Error('目录游标无效');
   if (source.startsWith('sse')) return fetchSse(source, page, context);
   if (source.startsWith('szse')) return fetchSzse(source, page, context);
-  return fetchNasdaq(source, page, context);
+  // Nasdaq is not paged: its screener order is non-deterministic between
+  // requests, so it goes through /api/catalog/nasdaq-screener (full download).
+  throw new Error('不支持的分页目录来源');
 }
 
 async function fetchSse(source: PagedSource, page: number, context: PageContext): Promise<PagedResult> {
@@ -74,35 +76,6 @@ async function fetchSzse(source: PagedSource, page: number, context: PageContext
   return { source, rows: instruments, declaredTotal, pageCount, fetchedCount: rows.length, excludedCount: excluded, nextCursor: page + 1 < pageCount ? String(page + 1) : null };
 }
 
-async function fetchNasdaq(source: PagedSource, page: number, context: PageContext): Promise<PagedResult> {
-  const kind = source === 'nasdaq_stocks' ? 'stocks' : 'etf';
-  const offset = page * 1000;
-  const url = new URL(`https://api.nasdaq.com/api/screener/${kind}?tableonly=true&limit=1000&offset=${offset}`);
-  const root = record(await fetchCatalogJson(url, context));
-  const data = record(root.data);
-  const table = (kind === 'stocks' ? data.table : record(data.records ?? data)) as Record<string, unknown>;
-  const container = table.data && typeof table.data === 'object' ? record(table.data) : table;
-  const rows = container.rows;
-  if (!Array.isArray(rows)) throw new Error('Nasdaq目录缺少记录');
-  const declaredTotal = Number(root.totalrecords ?? table.totalrecords ?? (rows.length ? offset + rows.length : 0));
-  const instruments: CatalogInstrument[] = [];
-  let excluded = 0;
-  for (const row of rows) {
-    const item = record(row);
-    const symbol = cleanText(item.symbol).toUpperCase().replace(/\s+/g, '');
-    const name = cleanText(kind === 'stocks' ? item.name : item.companyName);
-    if (!/^[A-Z0-9][A-Z0-9./^-]{0,19}$/.test(symbol) || !name) { excluded++; continue; }
-    if (kind === 'stocks' && (!isCommonEquity(name) || symbol.includes('^') || symbol.includes('/'))) { excluded++; continue; }
-    instruments.push({ id: `US:${symbol}`, symbol, name, market: 'US', kind: kind === 'etf' ? 'etf' : 'stock', currency: 'USD', exchange: 'US_MAIN', providers: { nasdaq: symbol }, listingStatus: 'listed', listedAt: cleanText(item.ipoyear) || null, catalogSource: 'nasdaq', catalogVersion: 'pending', mappingStatus: 'ready' });
-  }
-  const done = rows.length < 1000 || (declaredTotal > 0 && offset + rows.length >= declaredTotal);
-  return { source, rows: instruments, declaredTotal, pageCount: null, fetchedCount: rows.length, excludedCount: excluded, nextCursor: done ? null : String(page + 1) };
-}
-
-function isCommonEquity(name: string): boolean {
-  return !/\b(warrant|warrants|right|rights|unit|units|preferred|preference|depositary shares each representing|notes|debentures|bond|baby bond)\b/i.test(name);
-}
-
 export function isPagedSource(value: string): value is PagedSource {
-  return ['sse_main', 'sse_star', 'szse_stocks', 'szse_etf', 'nasdaq_stocks', 'nasdaq_etf'].includes(value);
+  return ['sse_main', 'sse_star', 'szse_stocks', 'szse_etf'].includes(value);
 }
