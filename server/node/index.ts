@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +23,10 @@ createServer(async (req, res) => {
       const isLong = LONG_PATHS.has(url.pathname) || /^\/api\/scans\/[^/]+\/retry$/.test(url.pathname);
       const signal = isLong ? undefined : AbortSignal.timeout(30_000);
       const handler = url.pathname.startsWith('/api/catalog') || url.pathname.startsWith('/api/scans') || url.pathname.startsWith('/api/snapshots') ? researchHandler : marketHandler;
-      const response = await handler(new Request(url, { method: req.method, signal, headers: req.headers as Record<string, string> }));
+      // Forward the request body so POST payloads (instrumentIds, scores, ...) reach the handler.
+      const hasBody = (req.method === 'POST' || req.method === 'PUT') && Number(req.headers['content-length'] ?? 1) > 0;
+      // Stream bodies on Node's undici require duplex: 'half'.
+      const response = await handler(new Request(url, { method: req.method, signal, headers: req.headers as Record<string, string>, ...(hasBody ? { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' as const } : {}) }));
       res.writeHead(response.status, Object.fromEntries(response.headers));
       res.end(req.method === 'HEAD' ? undefined : Buffer.from(await response.arrayBuffer()));
       return;

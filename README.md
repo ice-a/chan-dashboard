@@ -41,9 +41,9 @@
 ## Cloudflare 部署（已完成）
 
 - **正式地址：https://pan.020417.xyz**（自定义域名，Workers 自管 DNS 与证书）
-- KV 命名空间：`MARKET_KV`（ID `9fa0b1593cdb4dabb0a878932f4666fe`），实测 miss→hit 缓存生效
-- GitHub 仓库：https://github.com/ice-a/chan-dashboard
-- 自动部署：push 到 `main` 触发 GitHub Actions（测试→构建→`wrangler deploy`），需在仓库 Secrets 配置 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`
+- **D1 数据库**：`chan-dashboard-db`（ID `07e67e75-a97e-4e49-b679-2ed1be9cf00a`）承载目录、扫描台账、评分与**行情缓存**（`market_cache` 表）
+- KV 命名空间 `MARKET_KV` 保留为无 D1 时的回退缓存；**已不读写 KV**（Cloudflare 告警：KV 日操作接近上限 → 行情缓存迁至 D1，D1 每日 500 万行读 / 10 万行写）
+- GitHub 仓库：https://github.com/ice-a/chan-dashboard（仅代码托管；GitHub Actions 自动部署已按需求移除）
 - 手动部署：`pnpm build && pnpm cf:deploy`
 
 ## 全市场目录与扫描（2026-11 新增）
@@ -62,15 +62,19 @@
 
 目录同步要求逐页取完、数量与声明一致、跨来源无重复 ID；任何一页失败则该来源标记 failed，**未封口目录不会冒充全市场**。来源报告在页面"全市场目录与扫描"面板逐项展示。
 
-### 扫描与快照
+### 扫描与快照（D1 持久化 + 分片流水线）
 
-- `POST /api/catalog/sync`：同步四来源目录（需管理员令牌）。
-- `POST /api/scans`：按当前目录创建全量扫描任务；服务端分片并发执行，浏览器关闭不影响进度。
+- **目录同步两种驱动**：
+  - Node/Docker（`driver: server`）：`POST /api/catalog/sync` 一次完成四来源同步，每来源最多重试 2 次。
+  - Workers（`driver: client`）：逐页 `POST /api/catalog/sync/page`；港交所 XLSX 由**浏览器解析**（Workers CPU 10ms 预算）后 `POST /api/catalog/stage` 暂存，最后 `POST /api/catalog/commit` 提交。提交时任何来源未完成 → `complete:false`（未封口），不冒充全市场。
+- **扫描两种驱动**：
+  - Node：`POST /api/scans` 后服务端后台分片推进（每批 8 只），完成后自动评分并封口。
+  - Workers：前端循环 `POST /api/scans/:id/step` 推进 → `GET /raws` 拉取评分输入 → **浏览器计算全局排名**（`rankRawEntries`，与服务端同一纯函数）→ `POST /scores` 分块回写 → `POST /finalize` 封口校验。进度持久化在 D1，刷新页面可断点续跑。
 - `GET /api/scans/:id`：实时进度（成功 / 历史不足 / 失败 / 待处理）。
 - `POST /api/scans/:id/retry`：重试终态失败项。
-- 扫描完成并封口后发布研究快照，前端按分页读取排名。
+- 排名快照存 `score` 表，`/api/snapshots/current/rankings` 按 SQL 分页（≤200 条/页），不加载整库。
 
-数据源按市场能力路由（CN→东财→腾讯，US→Nasdaq），不再对每个标的探测不支持的市场。单标的逻辑与 `/api/market/bars` 完全一致。
+数据源按市场能力路由（CN→东财→腾讯，US→Nasdaq），不对不支持的市场做无效探测。K 线详情**按需计算**（`/detail` 端点现场取数+计算，0.3ms/只），不持久化 13k 份 K 线。
 
 ### 本地运行扫描
 
@@ -79,13 +83,14 @@ node server/node/index.ts --research-token <你的本地管理令牌>
 # 页面"全市场目录与扫描"→（localStorage 设置 chan-admin-token=<同一令牌>）→ 同步目录 → 启动扫描
 ```
 
-当前验证：13,340 只标的目录同步约 13 秒；扫描实时进度正常推进（本机网络下 CN/HK 上游不可达会进入失败台账并可重试，美股正常成功）。
+当前验证：13,335 只标的目录同步约 13 秒；扫描实时进度正常推进（本机网络下 CN/HK 上游不可达会进入失败台账并可重试，美股正常成功）。
 
 ### 已知缺口（如实标注，不伪造）
 
 - 港股 ETF 目录与北交所目录暂缺来源，页面会显示来源缺口而非假装完整。
-- 内存 store 重启后丢失；持久化 PostgreSQL/R2 存储为下一步（接口已按 ResearchStore 抽象预留）。
-- 扫描中的失败项可重试；继承上一成功快照的封口规则已在 `shared/integrity.ts` 实现。
+- 港交所工作簿有下载截断护栏（主板普通股 <1000 条即判失败）；本机网络实测常被截断到 5 条，需在可完整下载的网络重试。
+- 深交所/港交所依赖网络可达性，失败来源会标注 `failed` 并可重试；`complete:false` 目录即"未封口"，扫描可继续但来源缺口可见。
+- 扫描中的失败项可重试；封口校验在 `finalize` 与 `shared/integrity.ts`。
 
 ## 结构图谱、导出与本机历史
 
@@ -227,7 +232,13 @@ tests/              算法、校验、缓存与降级单元测试
 ## 验证状态
 
 - Vitest：22 项单元测试通过（含结构映射、收藏、导出和信号历史）。
-- TypeScript、Vite 生产构建：通过。ECharts 独立打包，首屏会加载图表模块。
+- TypeScript、Vite 生产构建：通过。ECharts 独立打包，首屏会加载图表模块；XLSX（港交所解析）按需分包。
+- D1 数据库：8 张表已应用到远程 `chan-dashboard-db`；行情缓存从 KV 迁至 D1（响应 Cloudflare KV 日操作上限告警）。
+- 全市场目录实测：上交所 1,604+405、Nasdaq 股票 5,807 / ETF 5,519、港交所与深交所因本机网络失败被如实标注；同步 ~13s、失败来源自动重试 2 次。
+- 全量扫描实测封口：13,335 只 31 分钟跑完（约 7 只/秒，本机网络限速），终态 = 10,411 成功 + 2,924 失败（CN/HK 上游不可达），评分 10,411 全部落表，四象限 995 / 2,134 / 713 / 6,569，封口校验通过并发布快照；进度实时可查、刷新页面可断点续显。
+- 快照查询实测：`/api/snapshots/current/rankings` 分页返回真实排名与总数，`current` 别名解析为真实快照 ID（修复后）；40 只抽样扫描 5 秒封口，32 成功全部可查、8 失败进入诊断。
+- 主题：浅色 / 深色 / 暖砂三套，图表随主题重绘；首屏数字（Hero、刷新分母、市场规模）全部改为动态取值。
 - Cloudflare：Wrangler dry-run 配置及 Worker 打包通过，本地健康检查通过，未执行线上部署。
 - Vercel：官方构建器及动态 Function 编译通过，直接 `fetch` 真实美股请求成功；CLI 本地开发需要已有登录凭据，未执行线上部署。
 - Docker：当前机器无 Docker 可执行文件，已提供配置但未能实际构建容器。
+- GitHub Actions：已按需求移除（仓库仅代码托管，手动 `pnpm cf:deploy`）。

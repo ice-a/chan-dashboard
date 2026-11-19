@@ -80,6 +80,46 @@ export interface ResearchSnapshot {
   diagnostics: ScanItemStatus[];
 }
 
+/** Lightweight snapshot header without loading every record (D1-friendly). */
+export interface ResearchBrief {
+  id: string;
+  catalogVersion: string;
+  createdAt: string;
+  algorithmVersion: 'legacy-v1';
+  complete: boolean;
+  total: number;
+  ready: number;
+  stale: number;
+  failed: number;
+  quadrants: Record<string, number>;
+}
+
+/** One claim returned by a scan step: the item plus its catalog instrument. */
+export interface ClaimedScanItem {
+  item: ScanItemStatus;
+  instrument: CatalogInstrument;
+}
+
+export interface RankEntry {
+  instrumentId: string;
+  name: string;
+  market: Market;
+  kind: 'stock' | 'etf';
+  chanScore: number;
+  raw: number;
+}
+
+export interface RankedScore {
+  instrumentId: string;
+  name: string;
+  market: Market;
+  kind: 'stock' | 'etf';
+  momentumScore: number;
+  resonance: number;
+  quadrant: string;
+  rank: number;
+}
+
 export function isCatalogId(id: string): boolean {
   return /^(CN|HK|US):[A-Z0-9][A-Z0-9.-]{0,19}$/.test(id);
 }

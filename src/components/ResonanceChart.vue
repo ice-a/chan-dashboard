@@ -11,6 +11,7 @@
 </template>
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useTheme } from '../composables/useTheme';
 import * as echarts from 'echarts';
 import type { ECharts, EChartsOption, ScatterSeriesOption } from 'echarts';
 import { useDashboardStore } from '../stores/dashboard';
@@ -18,11 +19,18 @@ import { QUADRANT_COLORS, QUADRANT_LABELS } from '../../shared/dashboard';
 import type { AnalysisRecord, Quadrant } from '../../shared/dashboard';
 import type { Instrument } from '../../shared/market';
 const store = useDashboardStore();
+const { themeVersion } = useTheme();
 const emit = defineEmits<{ select: [record: AnalysisRecord] }>();
 const chartEl = ref<HTMLElement>();
 let chart: ECharts | undefined;
 let observer: ResizeObserver | undefined;
 const counts = computed(() => Object.fromEntries(Object.keys(QUADRANT_LABELS).map((key) => [key, store.records.filter((r) => r.quadrant === key).length])) as Record<Quadrant, number>);
+
+function cssVar(name: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
 
 function draw() {
   if (!chartEl.value) return;
@@ -49,13 +57,14 @@ function draw() {
       return `<strong>${escapeHtml(p.data.instrument.name)}</strong> <span style="opacity:.55">${p.data.instrument.symbol}</span><br/><span style="opacity:.65">缠论 / 动量</span> &nbsp; <b>${p.data.value[0].toFixed(0)} / ${p.data.value[1].toFixed(0)}</b><br/><span style="opacity:.65">共振分</span> &nbsp; <b>${p.data.value[2].toFixed(1)}</b>`;
     } },
     grid: { left: 52, right: 24, top: 28, bottom: 49 },
-    xAxis: { type: 'value', name: '缠论结构分 →', nameLocation: 'middle', nameGap: 30, min: 0, max: 100, nameTextStyle: { color: '#75808b', fontSize: 11 }, axisLabel: { color: '#9a9fa5', fontSize: 10 }, axisLine: { lineStyle: { color: '#d9dce1' } }, splitLine: { lineStyle: { color: '#eeeae6', type: 'dashed' } } },
-    yAxis: { type: 'value', name: '动量分 →', nameLocation: 'middle', nameGap: 33, min: 0, max: 100, nameTextStyle: { color: '#75808b', fontSize: 11 }, axisLabel: { color: '#9a9fa5', fontSize: 10 }, axisLine: { lineStyle: { color: '#d9dce1' } }, splitLine: { lineStyle: { color: '#eeeae6', type: 'dashed' } } },
+    xAxis: { type: 'value', name: '缠论结构分 →', nameLocation: 'middle', nameGap: 30, min: 0, max: 100, nameTextStyle: { color: cssVar('--chart-text', '#75808b'), fontSize: 11 }, axisLabel: { color: cssVar('--chart-text', '#9a9fa5'), fontSize: 10 }, axisLine: { lineStyle: { color: cssVar('--chart-line', '#d9dce1') } }, splitLine: { lineStyle: { color: cssVar('--chart-grid', '#eeeae6'), type: 'dashed' } } },
+    yAxis: { type: 'value', name: '动量分 →', nameLocation: 'middle', nameGap: 33, min: 0, max: 100, nameTextStyle: { color: cssVar('--chart-text', '#75808b'), fontSize: 11 }, axisLabel: { color: cssVar('--chart-text', '#9a9fa5'), fontSize: 10 }, axisLine: { lineStyle: { color: cssVar('--chart-line', '#d9dce1') } }, splitLine: { lineStyle: { color: cssVar('--chart-grid', '#eeeae6'), type: 'dashed' } } },
     series,
   };
   chart.setOption(option, { notMerge: true });
 }
 watch(() => store.records, () => nextTick(draw), { deep: false });
+watch(themeVersion, () => nextTick(draw));
 onMounted(() => { draw(); chart?.on('click', (params) => { const instrument = (params.data as { instrument?: Instrument }).instrument; if (instrument) { const record = store.records.find((r) => r.instrument.id === instrument.id); if (record) emit('select', record); } }); observer = new ResizeObserver(() => chart?.resize()); observer.observe(chartEl.value!); });
 onBeforeUnmount(() => { observer?.disconnect(); chart?.dispose(); });
 function escapeHtml(text: string) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }

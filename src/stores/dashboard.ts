@@ -21,6 +21,8 @@ export const useDashboardStore = defineStore('dashboard', () => {
   let activeController: AbortController | undefined;
 
   const snapshotLoading = ref(false);
+  /** Universe size for the current load: fixture pool during refresh, snapshot total during paged load. */
+  const targetTotal = ref(0);
   /** Load the latest server-published full-market snapshot into the UI. */
   async function loadSnapshotPage(pageSize = 500): Promise<number> {
     snapshotLoading.value = true;
@@ -34,6 +36,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
         if (!body.ok) break;
         items.push(...body.page.items);
         total = body.page.total;
+        targetTotal.value = total;
         cursor = body.page.nextCursor;
         // Publish progressively so the ranking table fills in while later pages stream.
         records.value = [...items];
@@ -72,6 +75,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     loading.value = true;
     refreshError.value = '';
     completed.value = 0;
+    targetTotal.value = INSTRUMENTS.length;
     const previous = records.value;
     const results: AnalysisRecord[] = [];
     let cursor = 0;
@@ -143,7 +147,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   function getDetail(id: string): InstrumentDetail | undefined { return details.get(id); }
   function getRecord(id: string | null): AnalysisRecord | null { return id ? records.value.find((record) => record.instrument.id === id) ?? null : null; }
 
-  return { records, loading, completed, refreshError, nextRefreshAt, autoRefresh, frequencySeconds, online, providers, summary, snapshotLoading, refresh, cancel, loadProviders, getDetail, getRecord, loadSnapshotPage, loadInstrumentDetail };
+  return { records, loading, completed, refreshError, nextRefreshAt, autoRefresh, frequencySeconds, online, providers, summary, snapshotLoading, targetTotal, refresh, cancel, loadProviders, getDetail, getRecord, loadSnapshotPage, loadInstrumentDetail };
 });
 
 function unavailable(instrument: AnalysisRecord['instrument'], error: string, attempts: AnalysisRecord['attempts']): AnalysisRecord {

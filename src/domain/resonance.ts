@@ -35,3 +35,25 @@ export function applyRankChanges(records: AnalysisRecord[], previous: AnalysisRe
     record.rankDelta = oldRank === undefined || record.rank === null ? null : oldRank - record.rank;
   }
 }
+
+/**
+ * Cross-section ranking from compact entries (chan score + momentum raw only).
+ * Used by the server-side scan finalizer so a full-market snapshot can be
+ * ranked without loading every AnalysisRecord JSON into memory.
+ */
+export function rankRawEntries(entries: import('../../shared/catalog.ts').RankEntry[]): import('../../shared/catalog.ts').RankedScore[] {
+  if (!entries.length) return [];
+  const scores = crossSectionScores(entries);
+  const ranked = entries.map((entry) => {
+    const momentumScore = scores.get(entry)!;
+    const resonance = Math.round(Math.sqrt(Math.max(0, entry.chanScore) * Math.max(0, momentumScore)) * 10) / 10;
+    const strongChan = entry.chanScore >= 78, strongMomentum = momentumScore >= 70;
+    return {
+      instrumentId: entry.instrumentId, name: entry.name, market: entry.market, kind: entry.kind,
+      momentumScore, resonance,
+      quadrant: strongChan && strongMomentum ? 'resonance' : strongChan ? 'structure' : strongMomentum ? 'momentum' : 'weak',
+    };
+  });
+  ranked.sort((a, b) => (b.resonance - a.resonance) || (b.momentumScore - a.momentumScore) || a.instrumentId.localeCompare(b.instrumentId));
+  return ranked.map((score, index) => ({ ...score, rank: index + 1 }));
+}

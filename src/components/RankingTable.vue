@@ -28,7 +28,7 @@
         </table>
         <div v-if="!filtered.length" class="table-empty"><span class="empty-symbol">⌁</span><strong>{{ emptyTitle }}</strong><span>{{ emptyHint }}</span><button v-if="watchOnly === 'watchlist'" class="button subtle" @click="watchOnly = 'all'">查看全部标的</button></div>
       </div>
-      <div class="table-footer"><span>显示 {{ filtered.length }} / {{ store.records.length }} 只有效标的</span><span>缠论 ≥ 78 且动量 ≥ 70 判为共振强势 · Δ为相对上一轮排名</span></div>
+      <div class="table-footer"><span>显示 {{ filtered.length }} / {{ universeTotal }} 只有效标的</span><span>缠论 ≥ 78 且动量 ≥ 70 判为共振强势 · Δ为相对上一轮排名</span></div>
     </div>
   </section>
 </template>
@@ -54,10 +54,11 @@ const query = ref('');
 const sortKey = ref<'resonance' | 'chanScore' | 'momentumScore'>('resonance');
 const quadrantTabs = [{ value: 'all', label: '全部' }, { value: 'resonance', label: '共振强势' }, { value: 'structure', label: '结构先行' }, { value: 'momentum', label: '动量领先' }, { value: 'weak', label: '双弱' }] as const;
 const markets = [{ value: 'all', label: '全市场' }, { value: 'HK', label: '港股' }, { value: 'US', label: '美股' }, { value: 'CN', label: 'A股' }] as const;
+const universeTotal = computed(() => store.loading || store.snapshotLoading ? (store.targetTotal || store.summary.total) : store.records.length);
 const sortLabels = { resonance: '共振分', chanScore: '缠论分', momentumScore: '动量分' };
 const filtered = computed(() => store.records.filter((r) => r.status === 'ready' && (quadrant.value === 'all' || r.quadrant === quadrant.value) && (market.value === 'all' || r.instrument.market === market.value) && (watchOnly.value === 'all' || preferences.isWatched(r.instrument.id)) && `${r.instrument.symbol} ${r.instrument.name}`.toLowerCase().includes(query.value.trim().toLowerCase())).sort((a, b) => b[sortKey.value]! - a[sortKey.value]! || a.instrument.id.localeCompare(b.instrument.id)));
 const emptyTitle = computed(() => store.loading && !store.records.length ? '正在收集行情，排名将在本轮完成后生成' : watchOnly.value === 'watchlist' && !preferences.watchlist.length ? '还没有自选标的' : '当前筛选下暂无标的');
-const emptyHint = computed(() => store.loading && !store.records.length ? `${store.completed} / ${store.summary.total} 标的已返回` : watchOnly.value === 'watchlist' && !preferences.watchlist.length ? '点击任意标的旁的星标，建立你的观察清单' : '尝试切换象限、市场或清空搜索条件');
+const emptyHint = computed(() => store.loading && !store.records.length ? `${store.completed} / ${store.targetTotal || store.summary.total} 标的已返回` : watchOnly.value === 'watchlist' && !preferences.watchlist.length ? '点击任意标的旁的星标，建立你的观察清单' : '尝试切换象限、市场或清空搜索条件');
 function selectQuadrant(value: Quadrant) { quadrant.value = value; }
 function trendClass(value: number) { return value > 0 ? 'trend-up' : value < 0 ? 'trend-down' : ''; }
 function providerName(record: AnalysisRecord) { return record.snapshot ? `${PROVIDER_LABELS[record.snapshot.provider]}${record.snapshot.stale ? ' · 陈旧' : ''}` : '—'; }

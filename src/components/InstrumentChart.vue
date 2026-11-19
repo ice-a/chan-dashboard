@@ -8,15 +8,23 @@
 </template>
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useTheme } from '../composables/useTheme';
 import * as echarts from 'echarts';
 import type { ECharts, EChartsOption, LineSeriesOption } from 'echarts';
 import type { InstrumentDetail } from '../../shared/dashboard';
 
+const { themeVersion } = useTheme();
 const props = defineProps<{ detail: InstrumentDetail }>();
 const chartEl = ref<HTMLElement>();
 const range = ref(100);
 let chart: ECharts | undefined;
 let observer: ResizeObserver | undefined;
+
+function cssVar(name: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
 
 function draw() {
   if (!chartEl.value) return;
@@ -51,14 +59,14 @@ function draw() {
       { left: 58, right: 18, top: 455, height: 100 },
     ],
     xAxis: [
-      { type: 'category', data: dates, gridIndex: 0, boundaryGap: true, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { lineStyle: { color: '#ddd4dc' } } },
-      { type: 'category', data: dates, gridIndex: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { lineStyle: { color: '#ddd4dc' } } },
-      { type: 'category', data: structure.merged.map((bar) => bar.endDt), gridIndex: 2, axisLabel: { color: '#9b8d99', fontSize: 9 }, axisLine: { lineStyle: { color: '#ddd4dc' } }, axisTick: { show: false } },
+      { type: 'category', data: dates, gridIndex: 0, boundaryGap: true, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { lineStyle: { color: cssVar('--chart-line', '#ddd4dc') } } },
+      { type: 'category', data: dates, gridIndex: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { lineStyle: { color: cssVar('--chart-line', '#ddd4dc') } } },
+      { type: 'category', data: structure.merged.map((bar) => bar.endDt), gridIndex: 2, axisLabel: { color: cssVar('--chart-text', '#9b8d99'), fontSize: 9 }, axisLine: { lineStyle: { color: cssVar('--chart-line', '#ddd4dc') } }, axisTick: { show: false } },
     ],
     yAxis: [
-      { scale: true, gridIndex: 0, position: 'right', axisLabel: { color: '#9b8d99', fontSize: 9 }, splitLine: { lineStyle: { color: '#efe9ed', type: 'dashed' } } },
+      { scale: true, gridIndex: 0, position: 'right', axisLabel: { color: cssVar('--chart-text', '#9b8d99'), fontSize: 9 }, splitLine: { lineStyle: { color: cssVar('--chart-grid', '#efe9ed'), type: 'dashed' } } },
       { gridIndex: 1, position: 'right', axisLabel: { show: false }, splitLine: { show: false } },
-      { scale: true, gridIndex: 2, position: 'right', axisLabel: { color: '#9b8d99', fontSize: 9 }, splitLine: { lineStyle: { color: '#efe9ed', type: 'dashed' } } },
+      { scale: true, gridIndex: 2, position: 'right', axisLabel: { color: cssVar('--chart-text', '#9b8d99'), fontSize: 9 }, splitLine: { lineStyle: { color: cssVar('--chart-grid', '#efe9ed'), type: 'dashed' } } },
     ],
     dataZoom: [{ type: 'inside', xAxisIndex: [0, 1, 2], start: zoomStart, end: 100, minValueSpan: 15 }, { type: 'slider', xAxisIndex: [0, 1, 2], bottom: 0, height: 18, start: zoomStart, end: 100, borderColor: 'transparent', backgroundColor: '#f2ecef', fillerColor: '#b39bb52e', handleStyle: { color: '#a789a9' }, textStyle: { fontSize: 9, color: '#968492' } }],
     series: [
@@ -76,6 +84,7 @@ function draw() {
 }
 function setRange(value: number) { range.value = value; draw(); }
 watch(() => props.detail, () => nextTick(draw));
+watch(themeVersion, () => nextTick(draw));
 onMounted(() => { draw(); observer = new ResizeObserver(() => chart?.resize()); observer.observe(chartEl.value!); });
 onBeforeUnmount(() => { observer?.disconnect(); chart?.dispose(); });
 </script>

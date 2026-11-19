@@ -21,7 +21,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { PROVIDER_LABELS } from '../../shared/market';
-import type { AnalysisRecord } from '../../shared/dashboard';
+import type { AnalysisRecord, InstrumentDetail } from '../../shared/dashboard';
 import { formatTime, signed } from '../utils/format';
 import { downloadInstrument } from '../services/exporters';
 import { useDashboardStore } from '../stores/dashboard';
@@ -34,7 +34,13 @@ const store = useDashboardStore();
 const preferences = usePreferencesStore();
 const closeButton = ref<HTMLButtonElement>();
 const tab = ref<'chart' | 'diagnosis'>('chart');
-const detail = computed(() => props.record ? store.getDetail(props.record.instrument.id) : undefined);
+const remoteDetail = ref<InstrumentDetail | null>(null);
+const detail = computed(() => (props.record ? store.getDetail(props.record.instrument.id) : undefined) ?? remoteDetail.value);
+watch(() => props.record?.instrument.id, async (id) => {
+  remoteDetail.value = null;
+  if (!id || store.getDetail(id)) return;
+  remoteDetail.value = await store.loadInstrumentDetail(id).catch(() => null);
+}, { immediate: true });
 let previousFocus: HTMLElement | null = null;
 watch(() => props.record?.instrument.id, async (id, previous) => {
   if (id && !previous) previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
