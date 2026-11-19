@@ -1,0 +1,17 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      MARKET_CACHE_TTL_SECONDS: ${MARKET_CACHE_TTL_SECONDS:-300}
+      MARKET_STALE_TTL_SECONDS: ${MARKET_STALE_TTL_SECONDS:-86400}
+      MARKET_REQUEST_TIMEOUT_MS: ${MARKET_REQUEST_TIMEOUT_MS:-9000}
+      MARKET_PROVIDER_CONCURRENCY: ${MARKET_PROVIDER_CONCURRENCY:-4}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true

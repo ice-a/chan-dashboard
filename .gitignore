@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-worker/
+.vercel/
+.wrangler/
+.env
+.env.local
+*.log
+.DS_Store
