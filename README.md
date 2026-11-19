@@ -40,14 +40,11 @@
 
 ## Cloudflare 部署（已完成）
 
-已部署到 Workers + 静态资源 + KV：
-
-- 线上地址：https://chan-resonance-dashboard.19431581976267.workers.dev
-- KV 命名空间：`MARKET_KV`（ID `9fa0b1593cdb4dabb0a878932f4666fe`），用于跨请求日线缓存
-- 实测：`/api/health` 200；`US:AAPL` 返回 Nasdaq 300 根日线，首次 `miss`（4.8s）、二次 `hit`（1.4s），KV 缓存生效
-- 重新部署：`pnpm build && pnpm cf:deploy`
-
-注意：本机网络对 `*.workers.dev` 存在 DNS 污染（解析到非 Cloudflare IP），本地测试需 `curl --resolve` 固定到真实边缘 IP（104.21.91.251 / 172.67.183.107，可用 DoH 查询）。浏览器直接访问也受此影响；绑定自有域名后即可正常访问。
+- **正式地址：https://pan.020417.xyz**（自定义域名，Workers 自管 DNS 与证书）
+- KV 命名空间：`MARKET_KV`（ID `9fa0b1593cdb4dabb0a878932f4666fe`），实测 miss→hit 缓存生效
+- GitHub 仓库：https://github.com/ice-a/chan-dashboard
+- 自动部署：push 到 `main` 触发 GitHub Actions（测试→构建→`wrangler deploy`），需在仓库 Secrets 配置 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`
+- 手动部署：`pnpm build && pnpm cf:deploy`
 
 ## 全市场目录与扫描（2026-11 新增）
 
