@@ -8,11 +8,14 @@ import type { D1DatabaseLike, D1Statement } from './d1Types.ts';
  * client ('@libsql/client/web' on Workers, '@libsql/client' on Node).
  */
 class LibSqlStatement implements D1Statement {
-  constructor(
-    private readonly client: Client,
-    public readonly sql: string,
-    public readonly args: InValue[],
-  ) {}
+  readonly client: Client;
+  readonly sql: string;
+  readonly args: InValue[];
+  constructor(client: Client, sql: string, args: InValue[]) {
+    this.client = client;
+    this.sql = sql;
+    this.args = args;
+  }
 
   bind(...values: unknown[]): D1Statement {
     return new LibSqlStatement(this.client, this.sql, values as InValue[]);
