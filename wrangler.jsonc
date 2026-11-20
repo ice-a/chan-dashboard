@@ -14,21 +14,15 @@
     "MARKET_CACHE_TTL_SECONDS": "300",
     "MARKET_STALE_TTL_SECONDS": "86400",
     "MARKET_REQUEST_TIMEOUT_MS": "9000",
-    "MARKET_PROVIDER_CONCURRENCY": "4"
+    "MARKET_PROVIDER_CONCURRENCY": "4",
+    "TURSO_DATABASE_URL": "libsql://chan-dashboard-lovewater.aws-ap-northeast-1.turso.io",
+    "CRON_SCAN_BATCH": "8",
+    "CRON_CYCLE_HOUR_UTC": "16",
+    "CRON_IGNORE_GATE": "0"
   },
-  "kv_namespaces": [
-    {
-      "binding": "MARKET_KV",
-      "id": "9fa0b1593cdb4dabb0a878932f4666fe"
-    }
-  ],
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "chan-dashboard-db",
-      "database_id": "07e67e75-a97e-4e49-b679-2ed1be9cf00a"
-    }
-  ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
   "routes": [
     { "pattern": "pan.020417.xyz", "custom_domain": true }
   ]

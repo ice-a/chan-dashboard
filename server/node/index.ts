@@ -3,14 +3,25 @@ import { Readable } from 'node:stream';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createClient } from '@libsql/client';
 import { MemoryCache } from '../core/cache.ts';
+import { D1MarketCache } from '../storage/d1Cache.ts';
+import { D1ResearchStore } from '../storage/d1Store.ts';
+import { LibSqlDatabase } from '../storage/libsqlD1.ts';
 import { createDefaultRouter, createMarketHandler, createResearchHandler, json } from '../core/http.ts';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const dist = resolve(root, 'dist');
-const router = createDefaultRouter(new MemoryCache(), process.env);
 const cliToken = process.argv.includes('--research-token') ? process.argv[process.argv.indexOf('--research-token') + 1] : undefined;
-const researchHandler = createResearchHandler(router, cliToken ? { adminToken: cliToken } : {});
+// TURSO_DATABASE_URL (libsql:// 远程或 file: 本地文件) 开启持久化；未配置时使用进程内存。
+const libSqlUrl = process.env.TURSO_DATABASE_URL;
+const router = libSqlUrl
+  ? createDefaultRouter(new D1MarketCache(new LibSqlDatabase(createClient({ url: libSqlUrl, authToken: process.env.TURSO_AUTH_TOKEN || undefined }))), process.env)
+  : createDefaultRouter(new MemoryCache(), process.env);
+const researchStore = libSqlUrl
+  ? new D1ResearchStore(new LibSqlDatabase(createClient({ url: libSqlUrl, authToken: process.env.TURSO_AUTH_TOKEN || undefined })), { driver: 'server' })
+  : undefined;
+const researchHandler = createResearchHandler(router, researchStore ? { store: researchStore, adminToken: cliToken } : (cliToken ? { adminToken: cliToken } : {}));
 const marketHandler = createMarketHandler(router);
 // Catalog sync and full scans must not be bound by the short request timeout.
 const LONG_PATHS = new Set(['/api/catalog/sync', '/api/scans']);

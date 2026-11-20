@@ -6,8 +6,10 @@ import { tencentProvider } from './providers/tencent.ts';
 import { nasdaqProvider } from './providers/nasdaq.ts';
 import { ProviderRouter } from './providerRouter.ts';
 import { createDefaultResearchStore } from '../storage/researchStore.ts';
-import type { ResearchStore, CompletedItem, RankQuery } from '../storage/researchStore.ts';
+import type { ResearchStore, RankQuery } from '../storage/researchStore.ts';
 import { fetchCatalogPage, isPagedSource, type PagedSource } from '../catalog/paged.ts';
+import { finalizeRanked, processClaimed } from './scanPipeline.ts';
+import { listSignalEvents, signalStoreFrom } from '../storage/signalStore.ts';
 
 export interface ResearchHandlerOptions {
   store?: ResearchStore;
@@ -189,6 +191,26 @@ export function createResearchHandler(router: ProviderRouter, options: ResearchH
     }
 
     // ----- Published snapshot reads -----
+    if (path === '/api/snapshots/list') {
+      const limit = Math.min(90, Math.max(1, Number(url.searchParams.get('limit')) || 30));
+      return json({ ok: true, snapshots: await store.snapshotHistory(limit) });
+    }
+    if (path === '/api/snapshots/trends') {
+      const ids = (url.searchParams.get('ids') ?? '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 300);
+      if (!ids.length) return json({ ok: true, points: [] });
+      const limit = Math.min(90, Math.max(1, Number(url.searchParams.get('limit')) || 30));
+      return json({ ok: true, points: await store.trendPoints({ ids, limit }) });
+    }
+    if (path === '/api/snapshots/signals') {
+      const db = signalStoreFrom(store);
+      if (!db) return json({ ok: true, events: [], note: '当前驱动不支持服务端信号' });
+      const events = await listSignalEvents(db, {
+        market: url.searchParams.get('market') ?? undefined,
+        type: url.searchParams.get('type') ?? undefined,
+        limit: Number(url.searchParams.get('limit')) || 100,
+      });
+      return json({ ok: true, events });
+    }
     if (path === '/api/snapshots/current') {
       const brief = await store.researchBrief();
       if (!brief) return json({ ok: true, snapshot: null, note: '尚未发布研究快照' });
@@ -228,35 +250,8 @@ export function createResearchHandler(router: ProviderRouter, options: ResearchH
     return json({ error: 'Not found' }, 404);
   };
 
-  /** Process a claimed batch: fetch bars + compute legacy-v1 per instrument. */
-  async function processClaimed(routerRef: ProviderRouter, claimed: Awaited<ReturnType<ResearchStore['claimStep']>>): Promise<CompletedItem[]> {
-    const { computeAsset } = await import('../../src/domain/resonance.ts');
-    return Promise.all(claimed.map(async (entry): Promise<CompletedItem> => {
-      try {
-        const data = await routerRef.getDaily(entry.instrument);
-        if (data.candles.length < 130) {
-          return { instrumentId: entry.instrument.id, status: 'insufficient_history', lastError: `有效日线${data.candles.length}根，不足130根`, record: null };
-        }
-        const asset = computeAsset(data.candles);
-        if (!asset) return { instrumentId: entry.instrument.id, status: 'insufficient_history', lastError: '结构或动量数据不足', record: null };
-        const { candles: _candles, instrument: _instrument, ...metadata } = data;
-        return {
-          instrumentId: entry.instrument.id, status: 'succeeded', lastError: null,
-          record: {
-            instrument: entry.instrument, status: 'ready', chan: asset.chan, momentum: asset.momentum,
-            chanScore: null, momentumScore: null, resonance: null, quadrant: null, rank: null, rankDelta: null,
-            snapshot: { ...metadata, candleCount: data.candles.length }, attempts: data.attempts, error: null,
-          },
-        };
-      } catch (error) {
-        return { instrumentId: entry.instrument.id, status: 'failed_terminal', lastError: error instanceof Error ? error.message.slice(0, 180) : '扫描失败', record: null };
-      }
-    }));
-  }
-
   /** Node-only: drive a scan to completion in-process (steps, ranking, finalize). */
   async function backgroundRun(scanId: string): Promise<void> {
-    const { rankRawEntries } = await import('../../src/domain/resonance.ts');
     try {
       for (let guard = 0; guard < 100_000; guard++) {
         const current = await store.scanSummary(scanId);
@@ -268,17 +263,7 @@ export function createResearchHandler(router: ProviderRouter, options: ResearchH
       }
       const run = await store.scanSummary(scanId);
       if (!run || run.status !== 'running') return;
-      const entries: Awaited<ReturnType<ResearchStore['rawsPage']>>['rows'] = [];
-      let cursor = 0;
-      for (;;) {
-        const page = await store.rawsPage(scanId, cursor, 5000);
-        entries.push(...page.rows);
-        if (page.nextCursor === null) break;
-        cursor = page.nextCursor;
-      }
-      const scores = rankRawEntries(entries);
-      for (let i = 0; i < scores.length; i += 500) await store.saveScores(scanId, scores.slice(i, i + 500));
-      await store.finalizeScan(scanId);
+      await finalizeRanked(store, scanId);
     } catch (error) {
       console.error('background scan left resumable', error);
     }
