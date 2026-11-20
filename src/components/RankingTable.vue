@@ -1,6 +1,6 @@
 <template>
   <section aria-labelledby="ranking-title">
-    <div class="section-heading"><div><span class="section-index">03</span><h2 id="ranking-title">共振观察清单</h2></div><span>按 {{ sortLabels[sortKey] }} 排序 · 点击查看结构图谱</span></div>
+    <div class="section-heading"><div><span class="section-index">04</span><h2 id="ranking-title">共振观察清单</h2></div><span>按 {{ sortLabels[sortKey] }} 排序 · 点击查看结构图谱</span></div>
     <div class="panel ranking-panel">
       <div class="ranking-toolbar">
         <div class="filter-tabs" role="group" aria-label="象限筛选"><button v-for="tab in quadrantTabs" :key="tab.value" :class="{ active: quadrant === tab.value }" @click="quadrant = tab.value">{{ tab.label }}</button></div>

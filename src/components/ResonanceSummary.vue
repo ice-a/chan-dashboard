@@ -1,6 +1,6 @@
 <template>
   <section class="summary-section" aria-labelledby="summary-title">
-    <div class="section-heading"><div><span class="section-index">01</span><h2 id="summary-title">市场共振摘要</h2></div><span>随着每轮行情重新计算 · 相对排名并非收益预测</span></div>
+    <div class="section-heading"><div><span class="section-index">02</span><h2 id="summary-title">市场共振摘要</h2></div><span>随着每轮行情重新计算 · 相对排名并非收益预测</span></div>
     <div class="summary-grid">
       <button v-for="(quadrant, index) in quadrants" :key="quadrant.id" class="summary-card" :class="quadrant.id" @click="emit('select', quadrant.id)">
         <div class="summary-top"><span class="summary-number">0{{ index + 1 }}</span><span class="quadrant-label">{{ quadrant.label }}</span><span class="summary-count">{{ grouped[quadrant.id].length }}<small>只</small></span></div>

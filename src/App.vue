@@ -4,6 +4,7 @@
     <RefreshControl :countdown="countdown" />
     <main>
       <MarketUniversePanel />
+      <PipelinePanel />
       <ResonanceSummary @select="selectQuadrant" />
       <ResonanceChart @select="selectedId = $event.instrument.id" />
       <RankingTable ref="ranking" @select="selectedId = $event.instrument.id" />
@@ -24,6 +25,7 @@ import type { Quadrant } from '../shared/dashboard';
 import DashboardHero from './components/DashboardHero.vue';
 import RefreshControl from './components/RefreshControl.vue';
 import MarketUniversePanel from './components/MarketUniversePanel.vue';
+import PipelinePanel from './components/PipelinePanel.vue';
 import ResonanceSummary from './components/ResonanceSummary.vue';
 import ResonanceChart from './components/ResonanceChart.vue';
 import RankingTable from './components/RankingTable.vue';

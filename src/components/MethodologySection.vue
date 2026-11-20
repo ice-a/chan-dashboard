@@ -1,5 +1,5 @@
 <template>
-  <section class="method-section" aria-labelledby="method-title"><div class="section-heading"><div><span class="section-index">06</span><h2 id="method-title">理解这张看板</h2></div><span>口径透明，比结论本身更重要</span></div><div class="method-grid">
+  <section class="method-section" aria-labelledby="method-title"><div class="section-heading"><div><span class="section-index">07</span><h2 id="method-title">理解这张看板</h2></div><span>口径透明，比结论本身更重要</span></div><div class="method-grid">
     <article><span class="method-number">01</span><h3>缠论结构分 <small>0–100</small></h3><p>前复权（或单独标注的拆股调整）日线经过包含处理、分型、笔、中枢与MACD力度比较，再叠加末笔方向、20日涨幅和中枢位置。≥ 78 视为结构偏强。</p><span class="method-note">结构观察 ≠ 已确认买卖点</span></article>
     <article><span class="method-number">02</span><h3>动量截面分 <small>0–100</small></h3><p>组合20 / 60 / 120日收益、均线趋势、ATR波动与量能，转化为池内相对百分位。≥ 70 视为近期动量偏强。</p><span class="method-note">换样本池会改变相对排名</span></article>
     <article><span class="method-number">03</span><h3>二维共振分 <small>几何平均</small></h3><p>共振分 = √(缠论分 × 动量分)。两个维度同时偏高才有较高得分，用于横向观察，不是涨跌概率或目标收益。</p><span class="method-note">算法版本：legacy-v1</span></article>

@@ -1,6 +1,6 @@
 <template>
   <section aria-labelledby="trends-title">
-    <div class="section-heading"><div><span class="section-index">03</span><h2 id="trends-title">快照趋势</h2></div><span>服务端每日快照 · 排名与象限随时间变化</span></div>
+    <div class="section-heading"><div><span class="section-index">05</span><h2 id="trends-title">快照趋势</h2></div><span>服务端每日快照 · 排名与象限随时间变化</span></div>
     <div class="panel trends-panel">
       <div v-if="error" class="error-banner" role="alert"><AppIcon name="info" />{{ error }}</div>
       <template v-else-if="snapshots.length">

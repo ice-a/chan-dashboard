@@ -1,6 +1,6 @@
 <template>
   <section aria-labelledby="chart-title">
-    <div class="section-heading"><div><span class="section-index">02</span><h2 id="chart-title">二维共振图谱</h2></div><span>点击散点查看数据血缘与评分依据</span></div>
+    <div class="section-heading"><div><span class="section-index">03</span><h2 id="chart-title">二维共振图谱</h2></div><span>点击散点查看数据血缘与评分依据</span></div>
     <div class="panel chart-panel">
       <div class="panel-heading"><div><h3>缠论结构分 <span>×</span> 动量截面分</h3><p>横轴：结构状态 · 纵轴：池内相对动量</p></div><span class="sample-badge">{{ store.summary.sampleSize }} 个新鲜样本</span></div>
       <div v-if="!store.records.length" class="chart-placeholder"><span class="placeholder-orbit" /><strong>{{ store.loading ? '正在建立市场坐标…' : '暂无有效行情' }}</strong><span>{{ store.loading ? `${store.completed} / ${store.summary.total} · 每根K线只使用一个数据源` : '请检查数据源或稍后重试' }}</span></div>
