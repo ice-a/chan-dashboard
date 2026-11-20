@@ -2,6 +2,8 @@ import type { ProviderRouter } from './providerRouter.ts';
 import type { ResearchStore, SyncSourceState } from '../storage/researchStore.ts';
 import { fetchCatalogPage, isPagedSource, type PagedSource } from '../catalog/paged.ts';
 import { finalizeRanked, processClaimed } from './scanPipeline.ts';
+import type { StoredSignalEvent } from './signalDiff.ts';
+import { buildFinalizeNotification, hasNotifier, sendNotification, type NotifyConfig } from './notify.ts';
 
 /** Sources in commit-completeness order (must match d1Store.commitCatalog). */
 const SOURCES: string[] = ['sse_main', 'sse_star', 'szse_stocks', 'szse_etf', 'nasdaq_stocks', 'nasdaq_etf', 'hkex'];
@@ -23,10 +25,18 @@ export interface CronRunnerOptions {
   cycleHourUtc?: number;
   /** Skip the daily date gate entirely (verification / manual runs). */
   ignoreDailyGate?: boolean;
+  /**
+   * Hours after cycle start to wait for an external CN catalog sync (e.g. the
+   * Node host running scripts/sync-cn-catalog.ts) before committing a catalog
+   * whose CN sources all failed from this egress. 0 disables the wait.
+   */
+  cnSyncDeadlineHours?: number;
   /** Injectable clock (tests). */
   now?: () => Date;
   /** Injectable fetch (tests). */
   fetchImpl?: typeof globalThis.fetch;
+  /** Push channels notified once a snapshot publishes (all optional). */
+  notify?: NotifyConfig;
 }
 
 /**
@@ -46,6 +56,11 @@ export async function runCronTick(options: CronRunnerOptions): Promise<CronTickR
   const cycleHourUtc = options.cycleHourUtc ?? 16;
   const now = options.now ?? (() => new Date());
 
+  // Mirror scheduling config into app_state so /api/pipeline/status can report
+  // the live cadence without access to Worker env (fire-and-forget, tiny rows).
+  void store.setAppState('cron:cycle-hour-utc', String(cycleHourUtc)).catch(() => {});
+  void store.setAppState('cron:ignore-gate', options.ignoreDailyGate ? '1' : '0').catch(() => {});
+
   const latest = await store.latestScan();
   if (latest?.status === 'running') {
     const counts = latest.counts;
@@ -58,7 +73,15 @@ export async function runCronTick(options: CronRunnerOptions): Promise<CronTickR
         return { action: 'retry', detail: `重试 ${retried} 个失败项（每轮一次）` };
       }
       const scored = await finalizeRanked(store, latest.id);
-      await appendSignalEvents(store, latest.id, now);
+      const events = await appendSignalEvents(store, latest.id, now);
+      // Push once per published snapshot. Awaited (Workers freeze the isolate
+      // when the tick returns) but bounded: sendNotification has per-channel
+      // timeouts and never throws, so a dead notifier cannot stall finalize.
+      if (events && hasNotifier(options.notify)) {
+        await sendNotification(options.notify!, buildFinalizeNotification({
+          events, scored, total: latest.total, snapshotDate: now().toISOString().slice(0, 10),
+        }));
+      }
       return { action: 'finalize', detail: `快照封口并发布：${scored} 只评分` };
     }
     const stale = { staleBeforeMs: 10 * 60_000, maxAttempts: 5 };
@@ -91,6 +114,7 @@ export async function runCronTick(options: CronRunnerOptions): Promise<CronTickR
   // Advancing starts in the same tick so an empty ledger is never ambiguous.
   if (lastCycle !== today && (options.ignoreDailyGate || current.getUTCHours() >= cycleHourUtc)) {
     await store.setAppState('cron:last-cycle-date', today);
+    await store.setAppState('cron:cycle-start', current.toISOString());
     await store.resetSync();
     const started = await advanceSync(store, [], syncPagesPerTick, options.fetchImpl ?? globalThis.fetch, now);
     return { action: 'sync', detail: `每日周期启动：${started.detail}` };
@@ -106,6 +130,21 @@ export async function runCronTick(options: CronRunnerOptions): Promise<CronTickR
       return !!state && (state.status === 'complete' || state.status === 'failed');
     });
     if (!allTerminal) return advanceSync(store, states, syncPagesPerTick, options.fetchImpl ?? globalThis.fetch, now);
+    // Wait for an external CN sync (scripts/sync-cn-catalog.ts on a mainland
+    // host) when this egress could not reach SSE/SZSE. Holding the commit lets
+    // the CN rows land so the catalog is complete; past the deadline we commit
+    // whatever we have and the snapshot stays honestly "未封口".
+    const cnSources = ['sse_main', 'sse_star', 'szse_stocks', 'szse_etf'];
+    const cnMissing = cnSources.some((source) => bySource.get(source)?.status !== 'complete');
+    const deadlineHours = Math.max(0, options.cnSyncDeadlineHours ?? 0);
+    if (cnMissing && deadlineHours > 0) {
+      // A cycle started by an older build has no start marker: never wait on it.
+      const startedAt = await store.getAppState('cron:cycle-start');
+      const waited = startedAt ? (current.getTime() - new Date(startedAt).getTime()) / 3_600_000 : deadlineHours + 1;
+      if (waited < deadlineHours) {
+        return { action: 'idle', detail: `等待外部 CN 目录同步（已等 ${waited.toFixed(1)}h / ${deadlineHours}h）` };
+      }
+    }
     let commit: Awaited<ReturnType<ResearchStore['commitCatalog']>>;
     try {
       commit = await store.commitCatalog();
@@ -122,8 +161,8 @@ export async function runCronTick(options: CronRunnerOptions): Promise<CronTickR
   return { action: 'idle', detail: '今日周期已完成' };
 }
 
-/** After publishing snapshot N, diff its scores against snapshot N-1 into signal_events. */
-async function appendSignalEvents(store: ResearchStore, runId: string, now: () => Date): Promise<void> {
+/** After publishing snapshot N, diff its scores against snapshot N-1 into signal_events. Returns the new events (null on failure). */
+async function appendSignalEvents(store: ResearchStore, runId: string, now: () => Date): Promise<StoredSignalEvent[] | null> {
   try {
     const history = await store.snapshotHistory(3);
     const currentIndex = history.findIndex((item) => item.id === runId);
@@ -144,12 +183,15 @@ async function appendSignalEvents(store: ResearchStore, runId: string, now: () =
     const prevScores = previousId ? await loadScores(previousId) : null;
     const { diffSnapshotSignals } = await import('./signalDiff.ts');
     const events = diffSnapshotSignals(runId, previousId, prevScores as never, currentScores as never, now());
-    if (!events.length) return;
-    const { saveSignalEvents } = await import('../storage/signalStore.ts');
-    await saveSignalEvents(store, events);
+    if (events.length) {
+      const { saveSignalEvents } = await import('../storage/signalStore.ts');
+      await saveSignalEvents(store, events);
+    }
+    return events;
   } catch (error) {
     // Signals are additive; a diff failure must never fail the finalize action.
     console.error('[cron] signal diff failed', error);
+    return null;
   }
 }
 

@@ -81,6 +81,37 @@ describe('cron runner daily cycle', () => {
     expect((await tick(store)).action).toBe('idle');
   });
 
+  it('waits for an external CN sync before committing when CN sources failed', async () => {
+    const store = new MemoryResearchStore();
+    // Egress where SSE/SZSE are blocked (Workers), Nasdaq reachable, HKEX fails.
+    const cnBlockedFetch = (async (input: unknown) => {
+      const url = String(input instanceof URL ? input : (input as { url?: string; toString(): string }));
+      const json = (body: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body, arrayBuffer: async () => new ArrayBuffer(0) }) as unknown as Response;
+      if (url.includes('query.sse.com.cn') || url.includes('www.szse.cn')) return { ok: false, status: 403 } as unknown as Response;
+      if (url.includes('api.nasdaq.com')) return json(url.includes('/screener/etf') ? nasdaqEtf : nasdaqStocks);
+      return { ok: false, status: 403 } as unknown as Response;
+    }) as typeof fetch;
+    const tickWith = (now: Date) => runCronTick({ store, router: fakeRouter(), fetchImpl: cnBlockedFetch, now: () => now, batchSize: 16, cycleHourUtc: 16, ignoreDailyGate: true, cnSyncDeadlineHours: 3 });
+    const t0 = new Date('2026-11-20T17:30:00Z');
+    await tickWith(t0); // cycle-start
+    let waited = false;
+    for (let i = 0; i < 10; i++) {
+      const result = await tickWith(new Date(t0.getTime() + 60_000));
+      if (result.action === 'idle' && result.detail.includes('等待外部 CN')) { waited = true; break; }
+    }
+    expect(waited).toBe(true);
+    // No scan started while the commit is held.
+    expect(await store.latestScan()).toBeNull();
+    // Past the deadline the same ledger commits (honestly 未封口).
+    const after = new Date(t0.getTime() + 4 * 3_600_000);
+    let committed = false;
+    for (let i = 0; i < 3; i++) {
+      const result = await tickWith(after);
+      if (result.action === 'commit') { committed = true; expect(result.detail).toContain('未封口'); break; }
+    }
+    expect(committed).toBe(true);
+  });
+
   it('retries failed_terminal once per run before finalizing', async () => {
     const store = new MemoryResearchStore();
     await store.publishCatalog({ version: 'v1', createdAt: '2026-11-20T00:00:00Z', complete: true, instruments: [{ id: 'US:AAPL', symbol: 'AAPL', name: 'Apple', market: 'US', kind: 'stock', currency: 'USD', providers: { nasdaq: 'AAPL' }, listingStatus: 'listed', listedAt: null, exchange: 'US_MAIN', catalogSource: 'nasdaq', catalogVersion: 'v1', mappingStatus: 'ready' }], sources: [] });

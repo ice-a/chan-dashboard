@@ -10,6 +10,8 @@ import type { ResearchStore, RankQuery } from '../storage/researchStore.ts';
 import { fetchCatalogPage, isPagedSource, type PagedSource } from '../catalog/paged.ts';
 import { finalizeRanked, processClaimed } from './scanPipeline.ts';
 import { listSignalEvents, signalStoreFrom } from '../storage/signalStore.ts';
+import { buildPipelineStatus } from './pipelineStatus.ts';
+import { sendNotification, type NotifyConfig } from './notify.ts';
 
 export interface ResearchHandlerOptions {
   store?: ResearchStore;
@@ -17,6 +19,8 @@ export interface ResearchHandlerOptions {
   catalogTimeoutMs?: number;
   /** Auto-run scans in-process (Node). Workers use the client-driven pipeline instead. */
   backgroundScan?: boolean;
+  /** Push channels for the daily snapshot notification (optional). */
+  notify?: NotifyConfig;
 }
 
 export function createResearchHandler(router: ProviderRouter, options: ResearchHandlerOptions = {}) {
@@ -191,6 +195,21 @@ export function createResearchHandler(router: ProviderRouter, options: ResearchH
     }
 
     // ----- Published snapshot reads -----
+    if (path === '/api/pipeline/status') {
+      return json({ ok: true, status: await buildPipelineStatus(store) });
+    }
+    if (path === '/api/pipeline/test-notify' && request.method === 'POST') {
+      if (!checkAdmin(request, adminToken)) return json({ error: '需要管理员令牌' }, 401);
+      if (!options.notify || !(options.notify.barkUrl || options.notify.ntfyUrl || options.notify.webhookUrl)) {
+        return json({ ok: false, error: '未配置推送渠道（NOTIFY_BARK_URL / NOTIFY_NTFY_URL / NOTIFY_WEBHOOK_URL）' }, 400);
+      }
+      const results = await sendNotification(options.notify, {
+        title: '缠论看板 · 测试推送', body: '如果你看到这条消息，每日快照发布通知已接通。', group: 'chan-dashboard',
+      });
+      // Success = at least one configured channel answered 2xx.
+      const delivered = results.some((item) => /:2\d\d$/.test(item));
+      return json({ ok: delivered, results }, delivered ? 200 : 502);
+    }
     if (path === '/api/snapshots/list') {
       const limit = Math.min(90, Math.max(1, Number(url.searchParams.get('limit')) || 30));
       return json({ ok: true, snapshots: await store.snapshotHistory(limit) });
@@ -207,6 +226,7 @@ export function createResearchHandler(router: ProviderRouter, options: ResearchH
       const events = await listSignalEvents(db, {
         market: url.searchParams.get('market') ?? undefined,
         type: url.searchParams.get('type') ?? undefined,
+        since: url.searchParams.get('since') ?? undefined,
         limit: Number(url.searchParams.get('limit')) || 100,
       });
       return json({ ok: true, events });

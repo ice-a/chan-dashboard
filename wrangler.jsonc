@@ -18,6 +18,7 @@
     "TURSO_DATABASE_URL": "libsql://chan-dashboard-lovewater.aws-ap-northeast-1.turso.io",
     "CRON_SCAN_BATCH": "8",
     "CRON_CYCLE_HOUR_UTC": "16",
+    "CRON_CN_SYNC_DEADLINE_HOURS": "1",
     "CRON_IGNORE_GATE": "0"
   },
   "triggers": {

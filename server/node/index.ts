@@ -9,10 +9,13 @@ import { D1MarketCache } from '../storage/d1Cache.ts';
 import { D1ResearchStore } from '../storage/d1Store.ts';
 import { LibSqlDatabase } from '../storage/libsqlD1.ts';
 import { createDefaultRouter, createMarketHandler, createResearchHandler, json } from '../core/http.ts';
+import { hasNotifier, type NotifyConfig } from '../core/notify.ts';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const dist = resolve(root, 'dist');
 const cliToken = process.argv.includes('--research-token') ? process.argv[process.argv.indexOf('--research-token') + 1] : undefined;
+const notifyConfig: NotifyConfig = { barkUrl: process.env.NOTIFY_BARK_URL, ntfyUrl: process.env.NOTIFY_NTFY_URL, webhookUrl: process.env.NOTIFY_WEBHOOK_URL };
+const notify = hasNotifier(notifyConfig) ? notifyConfig : undefined;
 // TURSO_DATABASE_URL (libsql:// 远程或 file: 本地文件) 开启持久化；未配置时使用进程内存。
 const libSqlUrl = process.env.TURSO_DATABASE_URL;
 const router = libSqlUrl
@@ -21,7 +24,9 @@ const router = libSqlUrl
 const researchStore = libSqlUrl
   ? new D1ResearchStore(new LibSqlDatabase(createClient({ url: libSqlUrl, authToken: process.env.TURSO_AUTH_TOKEN || undefined })), { driver: 'server' })
   : undefined;
-const researchHandler = createResearchHandler(router, researchStore ? { store: researchStore, adminToken: cliToken } : (cliToken ? { adminToken: cliToken } : {}));
+const researchHandler = createResearchHandler(router, researchStore
+  ? { store: researchStore, adminToken: cliToken, notify }
+  : (cliToken ? { adminToken: cliToken, notify } : {}));
 const marketHandler = createMarketHandler(router);
 // Catalog sync and full scans must not be bound by the short request timeout.
 const LONG_PATHS = new Set(['/api/catalog/sync', '/api/scans']);
@@ -33,7 +38,7 @@ createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/')) {
       const isLong = LONG_PATHS.has(url.pathname) || /^\/api\/scans\/[^/]+\/retry$/.test(url.pathname);
       const signal = isLong ? undefined : AbortSignal.timeout(30_000);
-      const handler = url.pathname.startsWith('/api/catalog') || url.pathname.startsWith('/api/scans') || url.pathname.startsWith('/api/snapshots') ? researchHandler : marketHandler;
+      const handler = url.pathname.startsWith('/api/catalog') || url.pathname.startsWith('/api/scans') || url.pathname.startsWith('/api/snapshots') || url.pathname.startsWith('/api/pipeline') ? researchHandler : marketHandler;
       // Forward the request body so POST payloads (instrumentIds, scores, ...) reach the handler.
       const hasBody = (req.method === 'POST' || req.method === 'PUT') && Number(req.headers['content-length'] ?? 1) > 0;
       // Stream bodies on Node's undici require duplex: 'half'.

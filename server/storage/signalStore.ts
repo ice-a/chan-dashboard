@@ -28,11 +28,12 @@ export async function saveSignalEvents(store: ResearchStore, events: StoredSigna
   for (let i = 0; i < statements.length; i += 100) await db.batch(statements.slice(i, i + 100));
 }
 
-export async function listSignalEvents(db: D1DatabaseLike, query: { market?: string; type?: string; limit?: number }): Promise<StoredSignalEvent[]> {
+export async function listSignalEvents(db: D1DatabaseLike, query: { market?: string; type?: string; since?: string; limit?: number }): Promise<StoredSignalEvent[]> {
   const filters: string[] = [];
   const params: unknown[] = [];
   if (query.market) { filters.push('market = ?'); params.push(query.market); }
   if (query.type) { filters.push('type = ?'); params.push(query.type); }
+  if (query.since) { filters.push('created_at >= ?'); params.push(query.since); }
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const rows = await db.prepare(`SELECT * FROM signal_events ${where} ORDER BY created_at DESC LIMIT ?`).bind(...params, Math.min(500, Math.max(1, query.limit ?? 100))).all<SignalRow>();
   return rows.results.map((row) => {
