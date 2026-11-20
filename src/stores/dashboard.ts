@@ -23,6 +23,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const snapshotLoading = ref(false);
   /** Universe size for the current load: fixture pool during refresh, snapshot total during paged load. */
   const targetTotal = ref(0);
+  /** True once a published full-market snapshot has been loaded; the 81-fixture
+   * auto-refresh must never overwrite snapshot records with the test pool. */
+  const snapshotMode = ref(false);
   /** Load the latest server-published full-market snapshot into the UI. */
   async function loadSnapshotPage(pageSize = 500): Promise<number> {
     snapshotLoading.value = true;
@@ -41,7 +44,17 @@ export const useDashboardStore = defineStore('dashboard', () => {
         // Publish progressively so the ranking table fills in while later pages stream.
         records.value = [...items];
       } while (cursor);
-      if (items.length) details.clear();
+      if (items.length) {
+        details.clear();
+        snapshotMode.value = true;
+        // Invalidate any in-flight fixture refresh (auto tick can race the mount
+        // load) so its late results can never overwrite snapshot records.
+        generation++;
+        activeController?.abort();
+        activeController = undefined;
+        loading.value = false;
+        nextRefreshAt.value = Date.now() + frequencySeconds.value * 1000;
+      }
       return total;
     } finally { snapshotLoading.value = false; }
   }
@@ -65,6 +78,16 @@ export const useDashboardStore = defineStore('dashboard', () => {
   });
 
   async function refresh(manual = false): Promise<void> {
+    // Snapshot mode: the published full-market snapshot owns the records.
+    // Auto ticks only reschedule; manual refresh re-pulls the snapshot pages.
+    if (snapshotMode.value) {
+      if (manual) {
+        if (!snapshotLoading.value) await loadSnapshotPage();
+      } else {
+        nextRefreshAt.value = Date.now() + frequencySeconds.value * 1000;
+      }
+      return;
+    }
     if (loading.value) {
       if (!manual) return;
       activeController?.abort();
@@ -147,7 +170,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   function getDetail(id: string): InstrumentDetail | undefined { return details.get(id); }
   function getRecord(id: string | null): AnalysisRecord | null { return id ? records.value.find((record) => record.instrument.id === id) ?? null : null; }
 
-  return { records, loading, completed, refreshError, nextRefreshAt, autoRefresh, frequencySeconds, online, providers, summary, snapshotLoading, targetTotal, refresh, cancel, loadProviders, getDetail, getRecord, loadSnapshotPage, loadInstrumentDetail };
+  return { records, loading, completed, refreshError, nextRefreshAt, autoRefresh, frequencySeconds, online, providers, summary, snapshotLoading, snapshotMode, targetTotal, refresh, cancel, loadProviders, getDetail, getRecord, loadSnapshotPage, loadInstrumentDetail };
 });
 
 function unavailable(instrument: AnalysisRecord['instrument'], error: string, attempts: AnalysisRecord['attempts']): AnalysisRecord {

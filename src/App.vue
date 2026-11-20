@@ -7,6 +7,7 @@
       <ResonanceSummary @select="selectQuadrant" />
       <ResonanceChart @select="selectedId = $event.instrument.id" />
       <RankingTable ref="ranking" @select="selectedId = $event.instrument.id" />
+      <SnapshotTrends />
       <SignalHistory @select="selectedId = $event" />
       <DataSourcePanel @select="selectedId = $event.instrument.id" />
       <MethodologySection />
@@ -26,6 +27,7 @@ import MarketUniversePanel from './components/MarketUniversePanel.vue';
 import ResonanceSummary from './components/ResonanceSummary.vue';
 import ResonanceChart from './components/ResonanceChart.vue';
 import RankingTable from './components/RankingTable.vue';
+import SnapshotTrends from './components/SnapshotTrends.vue';
 import SignalHistory from './components/SignalHistory.vue';
 import DataSourcePanel from './components/DataSourcePanel.vue';
 import MethodologySection from './components/MethodologySection.vue';

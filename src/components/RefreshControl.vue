@@ -8,7 +8,7 @@
     <div class="refresh-actions">
       <label class="frequency"><span class="sr-only">刷新频率</span><select v-model.number="store.frequencySeconds" @change="store.nextRefreshAt = Date.now() + store.frequencySeconds * 1000"><option :value="60">1 分钟</option><option :value="300">5 分钟</option><option :value="900">15 分钟</option></select></label>
       <button class="button subtle" @click="store.autoRefresh = !store.autoRefresh"><AppIcon :name="store.autoRefresh ? 'pause' : 'play'" />{{ store.autoRefresh ? '暂停' : '继续' }}</button>
-      <button class="button primary" :disabled="store.loading || !store.online" @click="store.refresh(true)"><AppIcon name="refresh" :class="{ spinning: store.loading }" />{{ store.loading ? '更新中' : '立即刷新' }}</button>
+      <button class="button primary" :disabled="store.loading || store.snapshotLoading || !store.online" @click="store.refresh(true)"><AppIcon name="refresh" :class="{ spinning: store.loading || store.snapshotLoading }" />{{ store.loading || store.snapshotLoading ? '更新中' : store.snapshotMode ? '重新载入快照' : '立即刷新' }}</button>
     </div>
     <div v-if="store.loading && store.targetTotal" class="load-progress" :style="{ width: `${Math.min(100, store.completed / store.targetTotal * 100)}%` }" />
     <div v-else-if="store.loading" class="load-progress indeterminate" />

@@ -1,6 +1,6 @@
 <template>
   <section aria-labelledby="signals-title">
-    <div class="section-heading"><div><span class="section-index">04</span><h2 id="signals-title">本机信号动态</h2></div><span>从此刻开始，在浏览器里记录结构变化</span></div>
+    <div class="section-heading"><div><span class="section-index">05</span><h2 id="signals-title">本机信号动态</h2></div><span>从此刻开始，在浏览器里记录结构变化</span></div>
     <div class="panel signal-panel">
       <div class="signal-toolbar"><div class="signal-filters" role="group" aria-label="信号分类筛选"><button v-for="tab in tabs" :key="tab.value" :class="{ active: category === tab.value }" @click="category = tab.value">{{ tab.label }}<span>{{ count(tab.value) }}</span></button></div><div class="signal-actions"><span>仅本机保存 · 最多 {{ HISTORY_LIMIT }} 条</span><button :disabled="!filtered.length" @click="downloadSignals(filtered)"><AppIcon name="download" />导出</button><button :disabled="!history.events.length" @click="confirmClear = true">清空</button></div></div>
       <div v-if="confirmClear" class="clear-confirm" role="alert"><AppIcon name="info" /><span>清空当前浏览器保存的全部信号历史？此操作不影响收藏，且无法撤销。</span><button @click="confirmClear = false">取消</button><button class="danger" @click="clearHistory">确认清空</button></div>
