@@ -84,7 +84,13 @@ export interface ResearchStore {
   createScan(catalogVersion: string, instrumentIds?: string[]): Promise<ScanSummary>;
   scanSummary(id: string): Promise<ScanSummary | null>;
   latestScan(): Promise<ScanSummary | null>;
-  claimStep(id: string, limit: number): Promise<ClaimedScanItem[]>;
+  /**
+   * Claim the next pending items for processing. With options, also re-claims
+   * items stuck in 'running' past staleBeforeMs (crash/reload recovery), and
+   * fails items that have been claimed more than maxAttempts times without
+   * completion so a run can always be closed out.
+   */
+  claimStep(id: string, limit: number, options?: { staleBeforeMs?: number; maxAttempts?: number }): Promise<ClaimedScanItem[]>;
   completeStep(id: string, results: CompletedItem[]): Promise<ScanSummary>;
   retryFailed(id: string): Promise<number>;
   rawsPage(id: string, cursor: number, limit: number): Promise<{ rows: RankEntry[]; nextCursor: number | null; total: number }>;
@@ -95,6 +101,35 @@ export interface ResearchStore {
   researchBrief(): Promise<ResearchBrief | null>;
   rankingsPage(query: RankQuery): Promise<{ items: AnalysisRecord[]; total: number; nextCursor: string | null }>;
   diagnosticsPage(query: RankQuery): Promise<{ items: DiagnosticRow[]; total: number; nextCursor: string | null }>;
+
+  /** Published snapshots newest-first (bounded list for trend views). */
+  snapshotHistory(limit?: number): Promise<PublishedSnapshotBrief[]>;
+  /** Cross-snapshot points for the given instruments, oldest first. */
+  trendPoints(query: { ids: string[]; limit?: number }): Promise<TrendPoint[]>;
+
+  /** Small key/value memory for cron scheduling state (dates, retry markers). */
+  getAppState(key: string): Promise<string | null>;
+  setAppState(key: string, value: string): Promise<void>;
+}
+
+/** Bounded snapshot header for history/trend views. */
+export interface PublishedSnapshotBrief {
+  id: string;
+  createdAt: string | null;
+  ready: number;
+  failed: number;
+  total: number;
+  quadrants: Record<string, number>;
+}
+
+export interface TrendPoint {
+  snapshotId: string;
+  createdAt: string | null;
+  instrumentId: string;
+  rank: number | null;
+  quadrant: string | null;
+  chanScore: number | null;
+  momentumScore: number | null;
 }
 
 function emptyCounts(): Record<string, number> {
@@ -106,6 +141,7 @@ interface MemoryItem {
   status: 'pending' | 'running' | 'succeeded' | 'insufficient_history' | 'no_data' | 'mapping_review' | 'failed_terminal';
   attempts: number;
   lastError: string | null;
+  claimedAt?: number;
 }
 interface MemoryRun {
   id: string;
@@ -120,6 +156,9 @@ interface MemoryRun {
   brief: ResearchBrief | null;
 }
 
+/** Published runs kept for trend views (matches D1 retention). */
+const SNAPSHOT_RETENTION = 30;
+
 /**
  * In-process store for Node/Docker development. Same chunked contracts as the
  * D1 store; data resets with the process (documented in README).
@@ -130,6 +169,7 @@ export class MemoryResearchStore implements ResearchStore {
   private runs = new Map<string, MemoryRun>();
   private sync = new Map<string, SyncSourceState>();
   private staged = new Map<string, CatalogInstrument[]>();
+  private appState = new Map<string, string>();
 
   async publishCatalog(snapshot: CatalogSnapshot): Promise<void> {
     this.catalog = snapshot;
@@ -157,9 +197,11 @@ export class MemoryResearchStore implements ResearchStore {
     return { instruments: all.slice(start, start + limit), nextCursor: start + limit < all.length ? String(start + limit) : null, total: all.length };
   }
 
-  /** Staging is only used by the D1 (client) driver; memory driver commits full syncs directly. */
-  async stageCatalogPage(): Promise<SyncSourceState> {
-    throw new Error('当前驱动不支持分页目录同步');
+  /** Stages one fetched page; cursor continuity comes from sync_log pagesDone. */
+  async stageCatalogPage(result: PagedResult): Promise<SyncSourceState> {
+    const state = await this.stageCatalogRows(result.source, result.rows, { declaredTotal: result.declaredTotal ?? undefined, pageCount: result.pageCount ?? undefined, done: result.nextCursor === null });
+    state.pagesDone += 1;
+    return state;
   }
 
   async stageCatalogRows(source: string | 'hkex', rows: CatalogInstrument[], options?: { declaredTotal?: number; pageCount?: number; done?: boolean; sourceDate?: string | null }): Promise<SyncSourceState> {
@@ -172,6 +214,7 @@ export class MemoryResearchStore implements ResearchStore {
     state.stagedCount = merged.length;
     state.declaredTotal = options?.declaredTotal ?? state.declaredTotal;
     state.status = options?.done ? 'complete' : 'running';
+    state.pagesDone = options?.done ? (options.pageCount ?? state.pagesDone + 1) : state.pagesDone;
     state.updatedAt = new Date().toISOString();
     this.sync.set(source, state);
     return state;
@@ -232,15 +275,27 @@ export class MemoryResearchStore implements ResearchStore {
     return run ? this.summary(run) : null;
   }
 
-  async claimStep(id: string, limit: number): Promise<ClaimedScanItem[]> {
+  async claimStep(id: string, limit: number, options?: { staleBeforeMs?: number; maxAttempts?: number }): Promise<ClaimedScanItem[]> {
     const run = this.runs.get(id);
     if (!run || run.status !== 'running') return [];
+    const maxAttempts = options?.maxAttempts ?? 5;
+    const staleBefore = options?.staleBeforeMs != null ? Date.now() - options.staleBeforeMs : Number.MAX_SAFE_INTEGER;
+    // Items claimed but never written back past max attempts become terminal
+    // failures so a run can always be closed out.
+    for (const item of run.items.values()) {
+      if (item.status === 'running' && item.attempts >= maxAttempts && (item.claimedAt ?? 0) <= staleBefore) {
+        item.status = 'failed_terminal';
+        item.lastError = '领取后未回写（超时回收）';
+      }
+    }
     const claimed: ClaimedScanItem[] = [];
     for (const item of run.items.values()) {
       if (claimed.length >= limit) break;
-      if (item.status !== 'pending') continue;
+      const reclaimable = item.status === 'running' && item.attempts < maxAttempts && (item.claimedAt ?? 0) <= staleBefore;
+      if (item.status !== 'pending' && !reclaimable) continue;
       item.status = 'running';
       item.attempts++;
+      item.claimedAt = Date.now();
       const instrument = await this.findInstrument(item.instrumentId);
       if (!instrument) { item.status = 'failed_terminal'; item.lastError = '目录缺少该标的'; continue; }
       claimed.push({ item: { instrumentId: item.instrumentId, status: 'running', attemptCount: item.attempts, lastError: null }, instrument });
@@ -253,7 +308,7 @@ export class MemoryResearchStore implements ResearchStore {
     if (!run) throw new Error('扫描任务不存在');
     for (const result of results) {
       const item = run.items.get(result.instrumentId);
-      if (item) { item.status = result.status; item.lastError = result.lastError; }
+      if (item) { item.status = result.status; item.lastError = result.lastError; item.claimedAt = undefined; }
       if (result.record) run.records.set(result.instrumentId, result.record);
     }
     return this.summary(run);
@@ -311,6 +366,15 @@ export class MemoryResearchStore implements ResearchStore {
       quadrants,
     };
     run.brief = brief;
+    // Rotate: keep the newest SNAPSHOT_RETENTION completed runs (plus any still
+    // running) so trend views have history without unbounded growth.
+    const completed = [...this.runs.values()]
+      .filter((item) => item.status === 'completed' && item.id !== run.id)
+      .sort((a, b) => (b.finishedAt ?? '').localeCompare(a.finishedAt ?? ''));
+    for (const stale of completed.slice(Math.max(0, SNAPSHOT_RETENTION - 1))) this.runs.delete(stale.id);
+    for (const abandoned of [...this.runs.values()]) {
+      if (abandoned.status === 'running' && abandoned.startedAt <= new Date(Date.now() - 7 * 86_400_000).toISOString()) this.runs.delete(abandoned.id);
+    }
     return brief;
   }
 
@@ -319,6 +383,34 @@ export class MemoryResearchStore implements ResearchStore {
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
     return completed[0]?.brief ?? null;
   }
+
+  async snapshotHistory(limit = 30): Promise<PublishedSnapshotBrief[]> {
+    return [...this.runs.values()].filter((run) => run.status === 'completed' && run.brief)
+      .sort((a, b) => (b.finishedAt ?? '').localeCompare(a.finishedAt ?? ''))
+      .slice(0, limit)
+      .map((run) => ({ id: run.id, createdAt: run.finishedAt, ready: run.brief!.ready, failed: run.brief!.failed, total: run.total, quadrants: run.brief!.quadrants }));
+  }
+
+  async trendPoints(query: { ids: string[]; limit?: number }): Promise<TrendPoint[]> {
+    const ids = new Set(query.ids);
+    if (!ids.size) return [];
+    const runs = [...this.runs.values()].filter((run) => run.status === 'completed' && run.brief)
+      .sort((a, b) => (b.finishedAt ?? '').localeCompare(a.finishedAt ?? ''))
+      .slice(0, Math.min(Math.max(1, query.limit ?? 30), 90))
+      .reverse();
+    const points: TrendPoint[] = [];
+    for (const run of runs) {
+      for (const [instrumentId, score] of run.scores) {
+        if (!ids.has(instrumentId)) continue;
+        const record = run.records.get(instrumentId);
+        points.push({ snapshotId: run.id, createdAt: run.finishedAt, instrumentId, rank: score.rank, quadrant: score.quadrant, chanScore: record?.chan?.score ?? null, momentumScore: score.momentumScore });
+      }
+    }
+    return points;
+  }
+
+  async getAppState(key: string): Promise<string | null> { return this.appState.get(key) ?? null; }
+  async setAppState(key: string, value: string): Promise<void> { this.appState.set(key, value); }
 
   async rankingsPage(query: RankQuery): Promise<{ items: AnalysisRecord[]; total: number; nextCursor: string | null }> {
     const run = [...this.runs.values()].filter((item) => item.status === 'completed')

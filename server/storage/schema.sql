@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS scan_item (
   chan_score REAL,
   momentum_raw REAL,
   stale INTEGER NOT NULL DEFAULT 0,
+  claimed_at INTEGER,
   PRIMARY KEY (run_id, instrument_id)
 );
 CREATE INDEX IF NOT EXISTS idx_scan_item_status ON scan_item(run_id, status);
@@ -108,3 +109,26 @@ CREATE TABLE IF NOT EXISTS score (
   PRIMARY KEY (run_id, instrument_id)
 );
 CREATE INDEX IF NOT EXISTS idx_score_rank ON score(run_id, rank);
+
+-- Cron / auto-scan state machine memory (daily cycle date, per-run retry
+-- markers, per-source sync retry counters). Small, key-addressed.
+CREATE TABLE IF NOT EXISTS app_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- Server-side diffed signals between consecutive published snapshots.
+CREATE TABLE IF NOT EXISTS signal_events (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  prev_run_id TEXT,
+  instrument_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  market TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  type TEXT NOT NULL,
+  detail_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_signal_events_time ON signal_events(created_at);

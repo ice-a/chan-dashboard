@@ -5,7 +5,7 @@ import type {
 } from '../../shared/catalog.ts';
 import type { Market } from '../../shared/market.ts';
 import type { PagedResult } from '../catalog/paged.ts';
-import type { DiagnosticRow, CompletedItem, RankQuery, ScanSummary, SyncSourceState } from './researchStore.ts';
+import type { DiagnosticRow, CompletedItem, RankQuery, ScanSummary, SyncSourceState, PublishedSnapshotBrief, TrendPoint } from './researchStore.ts';
 import { asD1, type D1DatabaseLike, type D1Statement } from './d1Types.ts';
 
 interface InstrumentRow {
@@ -21,6 +21,9 @@ interface RunRow {
 }
 
 interface CountRow { status: string; n: number }
+
+/** Published snapshots kept for trend views; older runs and their rows rotate out. */
+const SNAPSHOT_RETENTION = 30;
 
 function emptyCounts(): Record<string, number> {
   return { pending: 0, running: 0, succeeded: 0, insufficient_history: 0, no_data: 0, mapping_review: 0, failed_terminal: 0 };
@@ -45,9 +48,13 @@ function toInstrument(row: InstrumentRow): CatalogInstrument {
  * rankings page by SQL without loading whole snapshots.
  */
 export class D1ResearchStore {
-  readonly driver = 'client' as const;
+  readonly driver: 'client' | 'server';
   private db: D1DatabaseLike;
-  constructor(db: unknown) { this.db = asD1(db); }
+  constructor(db: unknown, options: { driver?: 'client' | 'server' } = {}) {
+    this.db = asD1(db);
+    // Workers rely on the browser-driven pipeline; Node self-hosts can auto-drive scans in-process.
+    this.driver = options.driver ?? 'client';
+  }
 
   // ---------- Catalog: published ----------
 
@@ -289,16 +296,31 @@ export class D1ResearchStore {
     return this.summary(run, await this.countsOf(run.id));
   }
 
-  async claimStep(id: string, limit: number): Promise<ClaimedScanItem[]> {
+  async claimStep(id: string, limit: number, options?: { staleBeforeMs?: number; maxAttempts?: number }): Promise<ClaimedScanItem[]> {
     const run = await this.runRow(id);
     if (!run || run.status !== 'running') return [];
-    const claimed = await this.db.prepare(
-      'SELECT instrument_id FROM scan_item WHERE run_id = ? AND status = ? ORDER BY instrument_id LIMIT ?',
-    ).bind(id, 'pending', Math.max(1, Math.min(limit, 20))).all<{ instrument_id: string }>();
+    const maxAttempts = options?.maxAttempts ?? 5;
+    const staleBefore = options?.staleBeforeMs != null ? Date.now() - options.staleBeforeMs : null;
+    // Crash/reload recovery: items claimed long ago without writeback either
+    // get re-claimed (fresh attempts) or become terminal past max attempts so
+    // a run can always be closed out.
+    if (staleBefore != null) {
+      await this.db.prepare(
+        "UPDATE scan_item SET status = 'failed_terminal', last_error = ? WHERE run_id = ? AND status = 'running' AND attempts >= ? AND claimed_at IS NOT NULL AND claimed_at <= ?",
+      ).bind('领取后未回写（超时回收）', id, maxAttempts, staleBefore).run();
+    }
+    const limitN = Math.max(1, Math.min(limit, 20));
+    const claimed = staleBefore != null
+      ? await this.db.prepare(
+          "SELECT instrument_id FROM scan_item WHERE run_id = ? AND (status = 'pending' OR (status = 'running' AND attempts < ? AND claimed_at IS NOT NULL AND claimed_at <= ?)) ORDER BY instrument_id LIMIT ?",
+        ).bind(id, maxAttempts, staleBefore, limitN).all<{ instrument_id: string }>()
+      : await this.db.prepare(
+          "SELECT instrument_id FROM scan_item WHERE run_id = ? AND status = 'pending' ORDER BY instrument_id LIMIT ?",
+        ).bind(id, limitN).all<{ instrument_id: string }>();
     const ids = claimed.results.map((row) => row.instrument_id);
     if (!ids.length) return [];
     const placeholders = ids.map(() => '?').join(',');
-    await this.db.prepare(`UPDATE scan_item SET status = 'running', attempts = attempts + 1 WHERE run_id = ? AND instrument_id IN (${placeholders})`).bind(id, ...ids).run();
+    await this.db.prepare(`UPDATE scan_item SET status = 'running', attempts = attempts + 1, claimed_at = ? WHERE run_id = ? AND instrument_id IN (${placeholders})`).bind(Date.now(), id, ...ids).run();
     const rows = await this.db.prepare(
       `SELECT i.*, si.instrument_id FROM instrument i JOIN scan_item si ON si.instrument_id = i.id AND i.version = ? WHERE si.run_id = ? AND si.instrument_id IN (${placeholders})`,
     ).bind(run.catalog_version, id, ...ids).all<InstrumentRow & { instrument_id: string }>();
@@ -311,7 +333,7 @@ export class D1ResearchStore {
   async completeStep(id: string, results: CompletedItem[]): Promise<ScanSummary> {
     if (results.length) {
       const statements = results.map((result) => this.db.prepare(
-        'UPDATE scan_item SET status = ?, last_error = ?, record_json = ?, chan_score = ?, momentum_raw = ?, stale = ? WHERE run_id = ? AND instrument_id = ?',
+        'UPDATE scan_item SET status = ?, last_error = ?, record_json = ?, chan_score = ?, momentum_raw = ?, stale = ?, claimed_at = NULL WHERE run_id = ? AND instrument_id = ?',
       ).bind(result.status, result.lastError, result.record ? JSON.stringify(result.record) : null, result.record?.chan?.score ?? null, result.record?.momentum?.raw ?? null, result.record?.snapshot?.stale ? 1 : 0, id, result.instrumentId));
       for (let i = 0; i < statements.length; i += 20) await this.db.batch(statements.slice(i, i + 20));
     }
@@ -326,7 +348,7 @@ export class D1ResearchStore {
     if (!ids.length) return 0;
     const placeholders = ids.map(() => '?').join(',');
     await this.db.batch([
-      this.db.prepare(`UPDATE scan_item SET status = 'pending', attempts = 0, last_error = NULL WHERE run_id = ? AND instrument_id IN (${placeholders})`).bind(id, ...ids),
+      this.db.prepare(`UPDATE scan_item SET status = 'pending', attempts = 0, last_error = NULL, claimed_at = NULL WHERE run_id = ? AND instrument_id IN (${placeholders})`).bind(id, ...ids),
       this.db.prepare("UPDATE scan_run SET status = 'running', finished_at = NULL WHERE id = ?").bind(id),
     ]);
     return ids.length;
@@ -367,9 +389,16 @@ export class D1ResearchStore {
     const quadrants: Record<string, number> = {};
     for (const row of quadrantRows.results) quadrants[row.quadrant] = Number(row.n);
     const countsJson = JSON.stringify(counts);
+    // Rotate published snapshots: keep the newest SNAPSHOT_RETENTION so trend
+    // views have history; prune superseded runs' scan_item/score children and
+    // abandoned unpublished runs, which previously accumulated forever.
+    const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
     await this.db.batch([
       this.db.prepare("UPDATE scan_run SET status = 'completed', finished_at = ?, published = 1, counts_json = ? WHERE id = ?").bind(finishedAt, countsJson, id),
-      this.db.prepare('DELETE FROM scan_run WHERE id != ? AND published = 1').bind(id),
+      this.db.prepare('DELETE FROM scan_run WHERE published = 1 AND id != ? AND id NOT IN (SELECT id FROM scan_run WHERE published = 1 ORDER BY finished_at DESC LIMIT ?)').bind(id, SNAPSHOT_RETENTION),
+      this.db.prepare("DELETE FROM scan_item WHERE run_id NOT IN (SELECT id FROM scan_run WHERE published = 1 OR status = 'running')"),
+      this.db.prepare("DELETE FROM score WHERE run_id NOT IN (SELECT id FROM scan_run WHERE published = 1 OR status = 'running')"),
+      this.db.prepare("DELETE FROM scan_run WHERE published = 0 AND status != 'running' AND started_at <= ?").bind(cutoff),
     ]);
     return {
       id, catalogVersion: run.catalog_version, createdAt: finishedAt, algorithmVersion: 'legacy-v1',
@@ -450,5 +479,56 @@ export class D1ResearchStore {
       `SELECT si.instrument_id, si.status, si.attempts, si.last_error, i.name FROM scan_item si LEFT JOIN instrument i ON i.id = si.instrument_id WHERE ${where} ORDER BY si.instrument_id LIMIT ? OFFSET ?`,
     ).bind(...params, limit, start).all<{ instrument_id: string; status: string; attempts: number; last_error: string | null; name: string | null }>();
     return { items: rows.results.map((row) => ({ instrumentId: row.instrument_id, name: row.name ?? row.instrument_id, status: row.status, attemptCount: Number(row.attempts), lastError: row.last_error })), total: totalRow?.n ?? 0, nextCursor: start + rows.results.length < (totalRow?.n ?? 0) ? String(start + rows.results.length) : null };
+  }
+
+  async snapshotHistory(limit = 30): Promise<PublishedSnapshotBrief[]> {
+    const capped = Math.min(90, Math.max(1, limit));
+    const runs = await this.db.prepare('SELECT id, finished_at, total, counts_json FROM scan_run WHERE published = 1 AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT ?').bind(capped).all<{ id: string; finished_at: string; total: number; counts_json: string }>();
+    if (!runs.results.length) return [];
+    const ids = runs.results.map((row) => row.id);
+    const placeholders = ids.map(() => '?').join(',');
+    const readyRows = await this.db.prepare(`SELECT run_id, COUNT(*) AS n FROM score WHERE run_id IN (${placeholders}) GROUP BY run_id`).bind(...ids).all<{ run_id: string; n: number }>();
+    const quadRows = await this.db.prepare(`SELECT run_id, quadrant, COUNT(*) AS n FROM score WHERE run_id IN (${placeholders}) GROUP BY run_id, quadrant`).bind(...ids).all<{ run_id: string; quadrant: string; n: number }>();
+    const ready = new Map(readyRows.results.map((row) => [row.run_id, Number(row.n)]));
+    const quadrants = new Map<string, Record<string, number>>();
+    for (const row of quadRows.results) {
+      const perRun = quadrants.get(row.run_id) ?? {};
+      perRun[row.quadrant] = Number(row.n);
+      quadrants.set(row.run_id, perRun);
+    }
+    return runs.results.map((row) => {
+      const counts = JSON.parse(row.counts_json || '{}') as Record<string, number>;
+      const failed = ['insufficient_history', 'no_data', 'mapping_review', 'failed_terminal'].reduce((sum, key) => sum + (counts[key] ?? 0), 0);
+      return { id: row.id, createdAt: row.finished_at, ready: ready.get(row.id) ?? 0, failed, total: Number(row.total), quadrants: quadrants.get(row.id) ?? {} };
+    });
+  }
+
+  async trendPoints(query: { ids: string[]; limit?: number }): Promise<TrendPoint[]> {
+    if (!query.ids.length) return [];
+    const capped = Math.min(90, Math.max(1, query.limit ?? 30));
+    const ids = query.ids.slice(0, 300);
+    const runs = await this.db.prepare('SELECT id, finished_at FROM scan_run WHERE published = 1 AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT ?').bind(capped).all<{ id: string; finished_at: string }>();
+    if (!runs.results.length) return [];
+    runs.results.reverse();
+    const runPlaceholders = runs.results.map(() => '?').join(',');
+    const idPlaceholders = ids.map(() => '?').join(',');
+    const rows = await this.db.prepare(
+      `SELECT s.run_id, s.instrument_id, s.rank, s.quadrant, s.momentum_score, si.chan_score FROM score s JOIN scan_item si ON si.run_id = s.run_id AND si.instrument_id = s.instrument_id WHERE s.run_id IN (${runPlaceholders}) AND s.instrument_id IN (${idPlaceholders}) ORDER BY s.instrument_id, s.run_id`,
+    ).bind(...runs.results.map((row) => row.id), ...ids).all<{ run_id: string; instrument_id: string; rank: number; quadrant: string; momentum_score: number; chan_score: number | null }>();
+    const createdAt = new Map(runs.results.map((row) => [row.id, row.finished_at]));
+    return rows.results.map((row) => ({
+      snapshotId: row.run_id, createdAt: createdAt.get(row.run_id) ?? null, instrumentId: row.instrument_id,
+      rank: row.rank == null ? null : Number(row.rank), quadrant: row.quadrant ?? null,
+      chanScore: row.chan_score == null ? null : Number(row.chan_score), momentumScore: row.momentum_score == null ? null : Number(row.momentum_score),
+    }));
+  }
+
+  async getAppState(key: string): Promise<string | null> {
+    const row = await this.db.prepare('SELECT value FROM app_state WHERE key = ?').bind(key).first<{ value: string }>();
+    return row?.value ?? null;
+  }
+
+  async setAppState(key: string, value: string): Promise<void> {
+    await this.db.prepare('INSERT OR REPLACE INTO app_state (key, value, updated_at) VALUES (?, ?, ?)').bind(key, value, new Date().toISOString()).run();
   }
 }
