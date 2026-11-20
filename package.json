@@ -23,6 +23,7 @@
     "docker:up": "docker compose up --build"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "echarts": "^6.0.0",
     "pg": "^8.23.1",
     "pinia": "^3.0.4",

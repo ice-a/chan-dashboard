@@ -30,28 +30,3 @@ export class MemoryCache<T> implements MarketCache<T> {
   }
 }
 
-export interface KVBinding {
-  get(key: string, type: 'json'): Promise<unknown>;
-  put(key: string, value: string, options: { expirationTtl: number }): Promise<void>;
-}
-
-export class KVCache<T> implements MarketCache<T> {
-  readonly kind = 'cloudflare-kv';
-  private readonly kv: KVBinding;
-  private readonly fallback: MemoryCache<T>;
-  constructor(kv: KVBinding, fallback = new MemoryCache<T>()) { this.kv = kv; this.fallback = fallback; }
-  async get(key: string): Promise<CacheEntry<T> | undefined> {
-    try {
-      const value = await this.kv.get(`daily:${key}`, 'json') as CacheEntry<T> | null;
-      if (value && typeof value.expiresAt === 'number' && value.staleUntil > Date.now()) return value;
-    } catch { /* A cache failure must not block live market requests. */ }
-    return this.fallback.get(key);
-  }
-  async set(key: string, entry: CacheEntry<T>): Promise<void> {
-    await this.fallback.set(key, entry);
-    try {
-      const ttl = Math.max(1, Math.ceil((entry.staleUntil - Date.now()) / 1000));
-      await this.kv.put(`daily:${key}`, JSON.stringify(entry), { expirationTtl: ttl });
-    } catch { /* The response is still valid if persistent caching is unavailable. */ }
-  }
-}

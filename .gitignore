@@ -7,3 +7,9 @@ dist-worker/
 .env.local
 *.log
 .DS_Store
+
+# 迁移备份（体积大且含快照数据，仅在本地保留）
+d1-backup.sql
+d1-*.json
+kv-backup.json
+kv-keys.json
