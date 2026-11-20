@@ -16,6 +16,9 @@
 - 本机自选：固定配置池内收藏、自选筛选；默认仍按全池计算动量，不用子集重排。
 - 导出：当前筛选排名 CSV、单标的完整研究 JSON、本机信号事件 CSV。
 - 本机信号动态：象限、结构观察和超过5位的排名变化，最多240条，去重且忽略陈旧数据。
+- 服务端定时流水线：Workers Cron 每日自动同步目录 → 全市场扫描 → 评分封口，无需打开页面；页面"自动流水线"面板实时展示进度、速率与预计完成时间。
+- 快照历史与趋势：保留最近 30 轮每日快照，自选标的跨快照排名曲线对比。
+- 服务端信号：相邻快照自动 diff（象限跃迁、排名变动≥5位），跨设备保存；可选 Bark / ntfy / webhook 推送每日摘要。
 
 ## 数据源与口径
 
@@ -86,6 +89,27 @@ libSQL 适配器复用 D1 的 SQL 与 schema（`server/storage/schema.sql`），
 - `GET /api/scans/:id`：实时进度（成功 / 历史不足 / 失败 / 待处理）。
 - `POST /api/scans/:id/retry`：重试终态失败项。
 - 排名快照存 `score` 表，`/api/snapshots/current/rankings` 按 SQL 分页（≤200 条/页），不加载整库。
+- 快照轮转保留最近 30 轮（`GET /api/snapshots/list`），跨快照排名曲线走 `GET /api/snapshots/trends?ids=...`，页面"快照趋势"面板展示自选标的的曲线对比。
+
+### 服务端定时流水线（Workers Cron）
+
+`wrangler.jsonc` 挂载 `* * * * *` 定时任务，`server/core/cronRunner.ts` 每个 tick 做一小步并持久化进度（状态存 `app_state` 表），关掉浏览器也整夜推进：
+
+1. **每日门控**：UTC `CRON_CYCLE_HOUR_UTC`（默认 16 = 北京 0 点）后启动当日周期（目录同步 → 提交 → 扫描 → 封口发布）。
+2. **目录同步**：每 tick 推进最多 3 个来源；失败来源当日自动重试 2 次，仍失败如实落账。CN 来源被 Workers 出口 WAF 拦截时可配 `CRON_CN_SYNC_DEADLINE_HOURS`（默认 3）：提交前等待外部 CN 同步脚本（见下）把行暂存进来，超时则按"未封口"提交。
+3. **扫描推进**：每 tick 最多 `CRON_SCAN_BATCH`（当前 8）只；崩溃/超时未回写的领取项下一 tick 自动回收重扫（防死锁）；全部终态后自动重试一轮失败项，再评分封口。
+4. **信号与推送**：封口后与上一快照 diff（象限跃迁、排名变动 ≥5 位）写入 `signal_events`（`GET /api/snapshots/signals`，页面"信号动态 → 服务端信号"跨设备展示），并可选推送摘要到 **Bark / ntfy / 通用 webhook**（`NOTIFY_BARK_URL` / `NOTIFY_NTFY_URL` / `NOTIFY_WEBHOOK_URL`，任一配置即生效；Worker 侧用 `wrangler secret put`）。测试：`POST /api/pipeline/test-notify`（需管理令牌）。
+5. **状态可见**：`GET /api/pipeline/status` 返回周期门控、各来源进度与重试数、扫描速率与 ETA、最新快照；页面"自动流水线"面板每分钟刷新展示。
+
+免费版边界（实测）：cron 单次 invocation 的 CPU 与子请求数有硬上限，一批行情抓取（每只 1-9 秒上游 I/O）只能小批推进——批次 8 实测约 7-8 只/分钟稳定运行，11k 标的约 24 小时跑完。
+
+**CN 目录外部同步**（补 Workers 出口被 WAF 拦的上交所/深交所缺口）：在大陆网络可达的机器（本机 / VPS / Docker）每日周期启动后运行
+
+```bash
+node --env-file=.env scripts/sync-cn-catalog.ts   # 需要 TURSO_DATABASE_URL / TURSO_AUTH_TOKEN
+```
+
+逐页把 CN 目录暂存进同一 libSQL 库；已完成来源自动跳过，单源失败落账不中断其余，中断后重跑可续传。Workers cron 在等待窗口内看到行进来即照常提交。实测（2026-11-20，本机网络）：上交所主板 1,604 只 + 科创板 405 只共 22 页 6 秒入库；深交所对本机亦为 TLS 握手层掐断（连根域名都不通，IP/指纹级封锁），需换网络（如手机热点）重跑补齐。
 
 数据源按市场能力路由（CN→东财→腾讯，US→Nasdaq），不对不支持的市场做无效探测。K 线详情**按需计算**（`/detail` 端点现场取数+计算，0.3ms/只），不持久化 13k 份 K 线。
 
@@ -102,8 +126,8 @@ node server/node/index.ts --research-token <你的本地管理令牌>
 
 - 港股 ETF 目录与北交所目录暂缺来源，页面会显示来源缺口而非假装完整。
 - 港交所工作簿有下载截断护栏（主板普通股 <1000 条即判失败）；本机与 Cloudflare 出口实测拿到的都是仅含前 5 只的样本文件（非传输截断：有效 XLSX、字节完全一致），需换能取得完整文件的网络/客户端。
-- 深交所/港交所依赖网络可达性，失败来源会标注 `failed` 并可重试；Cloudflare 出口访问上交所会被 WAF 403 拦截（深交所、Nasdaq、港交所可达）。`complete:false` 目录即"未封口"，扫描可继续但来源缺口可见。
-- 扫描中的失败项可重试；封口校验在 `finalize` 与 `shared/integrity.ts`。
+- Cloudflare 出口访问上交所/深交所会被 WAF 403 拦截（Nasdaq、港交所可达），由服务端 cron 如实落账为 failed。本机大陆网络实测：上交所直连可用（`scripts/sync-cn-catalog.ts` 已验证入库 2,009 只），深交所对本机亦为 TLS 握手层掐断（Node/curl/PowerShell/代理均失败，IP/指纹级封锁），需换网络重跑补齐。`complete:false` 目录即"未封口"，扫描可继续但来源缺口可见。
+- 扫描中的失败项可重试；cron 每轮封口前自动重试一次；封口校验在 `finalize` 与 `shared/integrity.ts`。
 
 ## 结构图谱、导出与本机历史
 
@@ -148,6 +172,11 @@ pnpm start       # 生产模式：同一端口提供 dist 与 API
 | `MARKET_STALE_TTL_SECONDS` | `86400` | 全部来源失败时允许回退的最长时间 |
 | `MARKET_REQUEST_TIMEOUT_MS` | `9000` | 单个上游请求超时 |
 | `MARKET_PROVIDER_CONCURRENCY` | `4` | 每个供应商的服务端并发上限（1–8） |
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | 空（内存） | libSQL 持久化：远程 `libsql://…` 或本地 `file:./chan.db` |
+| `CRON_SCAN_BATCH` | `8` | 定时扫描每 tick 推进的标的数 |
+| `CRON_CYCLE_HOUR_UTC` | `16` | 每日周期启动的 UTC 小时（16 = 北京 0 点） |
+| `CRON_CN_SYNC_DEADLINE_HOURS` | `0` | CN 源失败后等待外部 CN 同步提交窗口（小时，0=不等） |
+| `NOTIFY_BARK_URL` / `NOTIFY_NTFY_URL` / `NOTIFY_WEBHOOK_URL` | 空（不推送） | 快照发布推送渠道，任一配置即生效 |
 
 ## Docker Compose
 
@@ -210,6 +239,11 @@ GET /api/market/providers
 GET /api/market/bars?instrument=US:AAPL
 GET /api/market/bars?instrument=HK:00700
 GET /api/market/bars?instrument=CN:510300
+GET /api/pipeline/status                      # 定时流水线状态（门控/来源/扫描速率与ETA/最新快照）
+GET /api/snapshots/list                       # 已发布快照（最近30轮）
+GET /api/snapshots/trends?ids=US:AAPL,CN:600519
+GET /api/snapshots/signals?since=&limit=      # 服务端跨快照信号事件
+POST /api/pipeline/test-notify                # 推送渠道自检（需 x-admin-token）
 ```
 
 返回 `MarketResponse`：`MarketData` 包含实际 `provider`、`adjustment`、`sourceDate`、`receivedAt`、`cache`、`stale`、`isUnclosed`、`attempts` 和完整 `candles`。失败返回结构化错误及逐源原因，HTTP 502 不代表前端的整个页面失败。
