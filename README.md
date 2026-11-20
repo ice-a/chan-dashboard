@@ -41,10 +41,23 @@
 ## Cloudflare 部署（已完成）
 
 - **正式地址：https://pan.020417.xyz**（自定义域名，Workers 自管 DNS 与证书）
-- **D1 数据库**：`chan-dashboard-db`（ID `07e67e75-a97e-4e49-b679-2ed1be9cf00a`）承载目录、扫描台账、评分与**行情缓存**（`market_cache` 表）
-- KV 命名空间 `MARKET_KV` 保留为无 D1 时的回退缓存；**已不读写 KV**（Cloudflare 告警：KV 日操作接近上限 → 行情缓存迁至 D1，D1 每日 500 万行读 / 10 万行写）
+- **libSQL 数据库**（Turso Cloud 免费档：5 亿行读/月 + 1000 万行写/月，SQLite 方言）：承载目录、扫描台账、评分与**行情缓存**（`market_cache` 表）。D1 免费档为日配额（500 万行读/天 + 10 万行写/天），一轮全市场同步+扫描即耗尽，故整体迁移至 libSQL
+- Worker 通过 `@libsql/client/web`（HTTP 传输）访问 Turso：`TURSO_DATABASE_URL` 为 var，`TURSO_AUTH_TOKEN` 用 `wrangler secret put` 配置
+- **KV 已删除**：`MARKET_KV` 绑定与 `KVCache` 代码路径已移除（曾因 KV 日操作上限告警，先迁 D1、后随整体迁移落 libSQL）
+- **D1 已删除**：`chan-dashboard-db` 绑定移除；迁移前数据已导出（`d1-*.json`、`d1-backup.sql`）并通过 `scripts/migrate-to-libsql.ts` 落库
 - GitHub 仓库：https://github.com/ice-a/chan-dashboard（仅代码托管；GitHub Actions 自动部署已按需求移除）
 - 手动部署：`pnpm build && pnpm cf:deploy`
+
+### 存储适配层
+
+存储收敛在两个接口后：`ResearchStore`（目录+扫描）与 `MarketCache<T>`（行情缓存）。现有实现：
+
+| 实现 | 后端 | 驱动 |
+| --- | --- | --- |
+| `D1ResearchStore` + `D1MarketCache` + `LibSqlDatabase` | Turso Cloud / sqld / `file:` 本地库 | Workers `client`；Node 可传 `{ driver: 'server' }` |
+| `MemoryResearchStore` + `MemoryCache` | 进程内存（未配置 `TURSO_DATABASE_URL` 时） | Node `server` |
+
+libSQL 适配器复用 D1 的 SQL 与 schema（`server/storage/schema.sql`），Node 自托管（Docker）与 Workers 共用同一套存储代码。
 
 ## 全市场目录与扫描（2026-11 新增）
 
@@ -62,14 +75,14 @@
 
 目录同步要求逐页取完、数量与声明一致、跨来源无重复 ID；任何一页失败则该来源标记 failed，**未封口目录不会冒充全市场**。来源报告在页面"全市场目录与扫描"面板逐项展示。
 
-### 扫描与快照（D1 持久化 + 分片流水线）
+### 扫描与快照（libSQL 持久化 + 分片流水线）
 
 - **目录同步两种驱动**：
   - Node/Docker（`driver: server`）：`POST /api/catalog/sync` 一次完成四来源同步，每来源最多重试 2 次。
   - Workers（`driver: client`）：逐页 `POST /api/catalog/sync/page`；港交所 XLSX 与 Nasdaq 全量 JSON 由**浏览器解析**（Workers CPU 10ms 预算，`/api/catalog/hkex-workbook`、`/api/catalog/nasdaq-screener` 仅透传字节）后 `POST /api/catalog/stage` 暂存，最后 `POST /api/catalog/commit` 提交。提交校验要求 7 个预期来源全部在场且完成，否则 `complete:false`（未封口），不冒充全市场。任一分页失败会**落账为 failed 并继续其余来源**（逐来源重试 2 次），不会一源失败中断全局。
 - **扫描两种驱动**：
   - Node：`POST /api/scans` 后服务端后台分片推进（每批 8 只），完成后自动评分并封口。
-  - Workers：前端循环 `POST /api/scans/:id/step` 推进 → `GET /raws` 拉取评分输入 → **浏览器计算全局排名**（`rankRawEntries`，与服务端同一纯函数）→ `POST /scores` 分块回写 → `POST /finalize` 封口校验。进度持久化在 D1，刷新页面可断点续跑。
+  - Workers：前端循环 `POST /api/scans/:id/step` 推进 → `GET /raws` 拉取评分输入 → **浏览器计算全局排名**（`rankRawEntries`，与服务端同一纯函数）→ `POST /scores` 分块回写 → `POST /finalize` 封口校验。进度持久化在 libSQL，刷新页面可断点续跑。
 - `GET /api/scans/:id`：实时进度（成功 / 历史不足 / 失败 / 待处理）。
 - `POST /api/scans/:id/retry`：重试终态失败项。
 - 排名快照存 `score` 表，`/api/snapshots/current/rankings` 按 SQL 分页（≤200 条/页），不加载整库。
@@ -231,12 +244,13 @@ tests/              算法、校验、缓存与降级单元测试
 
 ## 验证状态
 
-- Vitest：22 项单元测试通过（含结构映射、收藏、导出和信号历史）。
+- Vitest：29 项单元测试通过（含结构映射、收藏、导出、信号历史与 libSQL 适配器）。
 - TypeScript、Vite 生产构建：通过。ECharts 独立打包，首屏会加载图表模块；XLSX（港交所解析）按需分包。
-- D1 数据库：8 张表已应用到远程 `chan-dashboard-db`；行情缓存从 KV 迁至 D1（响应 Cloudflare KV 日操作上限告警，KV 已不读写）。
+- 存储：已从 D1/KV 整体迁移至 libSQL（Turso Cloud 免费档）。迁移前 D1 数据导出并落库对账通过（instrument 13,436、market_cache 64、catalog_meta 1、KV 残留缓存 107 键）。KV/D1 绑定与 `KVCache` 代码路径已删除。
+- 配额：libSQL 免费档按月计（5 亿行读/月 + 1000 万行写/月），一轮全市场同步+扫描约 6-7 万行写，余量约 4-5 倍；不再受 D1 日配额约束。
 - Cloudflare 线上：已部署至 **https://pan.020417.xyz**（`pnpm exec wrangler deploy`），`RESEARCH_ADMIN_TOKEN` 以 Worker secret 配置，无令牌写操作返回 401；Nasdaq 全量透传解析、分页同步、失败落账均在线上实测通过。
 - 线上目录现状（未封口如实展示）：深交所 2,905 + ETF 772、Nasdaq 5,805 + ETF 5,519 完整；上交所被 Cloudflare 出口 403、港交所仅获样本文件，标 failed 待重试。
-- 配额约束：KV 日限额已耗尽（不再读写）；D1 行读写接近每日上限时，线上 nasdaq 目录补暂存（约 1.1 万行写入）与线上全量扫描推迟到限额重置（UTC 00:00）后执行。
+- 配额约束（历史）：KV 日限额与 D1 日行读写限额均已耗尽，是本次整体迁移到 libSQL 的直接原因。
 - 全市场目录实测：上交所 1,604+405、Nasdaq 股票 5,807 / ETF 5,519、港交所与深交所因本机网络失败被如实标注；同步约 13–60 秒（视网络）、失败来源自动重试 2 次。
 - 全量扫描实测封口：13,335 只 31 分钟跑完（约 7 只/秒，本机网络限速），两轮终态分别为 10,411 + 2,924 与 8,393 + 4,942 成功/失败（本机网络随时间劣化，失败项可重试），评分与四象限（首轮 995 / 2,134 / 713 / 6,569）全部落表，封口校验通过并发布快照；进度实时可查、刷新页面可断点续显。
 - 快照查询实测：`/api/snapshots/current/rankings` 分页返回真实排名与总数（`current` 别名解析为真实快照 ID）；40 只抽样扫描 5 秒封口，32 成功全部可查、8 失败进入诊断。排名并列按算法口径（共振分 → 动量分 → ID）对齐，# 列与显示顺序一致。
